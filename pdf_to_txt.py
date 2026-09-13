@@ -15,20 +15,40 @@ Usage:
 
 Output format:
     Each page is wrapped like this, so downstream tools/agents can
-    reliably find page boundaries:
+    reliably find page boundaries. A printed_page tag is always
+    included alongside pdf_page -- if no --page-offset/--known-pair is
+    given, the offset defaults to 0, so printed_page just matches
+    pdf_page:
 
         <!-- pdf_page: 1 -->
-        ...extracted text for page 1...
+        <!-- printed_page: 1 -->
+        # Chapter 3: Combat
+        Body text follows normally...
 
         <!-- pdf_page: 2 -->
+        <!-- printed_page: 2 -->
         ...extracted text for page 2...
 
-    If --page-offset is given, a second tag is added with the computed
-    printed page number:
+    With --page-offset/--known-pair set, printed_page reflects the
+    computed offset instead:
 
         <!-- pdf_page: 5 -->
         <!-- printed_page: 1 -->
         ...extracted text for page 5...
+
+Heading detection (automatic, no flag needed):
+    The script does a first pass over the whole document to find the
+    most common font size (the body-text baseline), then a second pass
+    where lines meaningfully larger and/or bolder than that baseline
+    get prefixed with markdown heading markers (#, ##, ###) based on
+    how much larger they are. Short line length is also required, to
+    avoid mistaking large pull-quotes/callouts for headings.
+
+    This is a heuristic, same idea as what dedicated tools like
+    `marker` use internally. It won't be perfect on every layout
+    (e.g. headings styled with color/caps instead of size, or
+    idiosyncratic stat-block titles) -- spot check a sample of pages
+    against the source PDF, especially chapter openers and sidebars.
 
 Notes:
     - "pdf_page" is the 1-indexed position in the FILE, not necessarily
@@ -44,8 +64,8 @@ Notes:
       convenient to check by eye -- doesn't have to be page 1.
     - This only works for a CONSTANT offset. If numbering resets or
       shifts partway through (common with chapter-based numbering, or
-      unnumbered inserts), you'll need --detect-printed-page instead,
-      or a per-section offset table.
+      unnumbered inserts), a single offset can't describe the whole
+      book -- you'd need a per-section offset table instead.
     - Pages that fall before printed page 1 (i.e. the front matter
       itself) are tagged as printed_page: front-matter rather than a
       negative or zero number.
@@ -57,8 +77,8 @@ Notes:
 """
 
 import argparse
-import re
 import sys
+from collections import Counter
 from pathlib import Path
 
 try:
@@ -70,24 +90,120 @@ except ImportError:
         "(or just: pip install pymupdf, if you're not on a system-managed env)"
     )
 
+BOLD_FLAG = 1 << 4  # PyMuPDF span flags bit for bold
 
-def guess_printed_page_number(page_text: str) -> str | None:
+
+def reorder_columns(lines: list[dict], page_width: float) -> list[dict]:
     """
-    Best-effort heuristic: look for a lone number in the first or last
-    few lines of the page text (common footer/header location for page
-    numbers). This is NOT reliable -- always spot-check a sample before
-    trusting it. Returns None if nothing plausible is found.
+    Reading-order fix for multi-column pages. The naive approach of
+    sorting by (y-band, x) assumes text rows line up across columns --
+    they usually don't, since paragraphs run different lengths in each
+    column, which is what causes jumbled/interleaved output.
+
+    Instead: sort top-to-bottom first, then walk down the page bucketing
+    each line into a left or right column based on its horizontal
+    position. A line wide enough to span most of the page (a heading,
+    a full-width caption) is treated as a break -- it flushes whatever
+    has accumulated in the left column, then the right column, in that
+    order, before the full-width line itself is emitted. This handles
+    the common pattern of a heading interrupting two columns partway
+    down the page, not just a single header/footer at the very top.
     """
-    lines = [l.strip() for l in page_text.splitlines() if l.strip()]
-    candidates = lines[:3] + lines[-3:]
-    for line in candidates:
-        if re.fullmatch(r"\d{1,4}", line):
-            return line
-        # common "Page N" / "N of M" patterns
-        m = re.fullmatch(r"(?:page\s*)?(\d{1,4})(?:\s*of\s*\d+)?", line, re.I)
-        if m:
-            return m.group(1)
-    return None
+    sorted_lines = sorted(lines, key=lambda l: l["bbox"][1])
+    full_width_threshold = 0.6 * page_width
+    col_split = page_width / 2
+
+    output: list[dict] = []
+    left_buf: list[dict] = []
+    right_buf: list[dict] = []
+
+    for line in sorted_lines:
+        x0, _, x1, _ = line["bbox"]
+        width = x1 - x0
+        # A line counts as "full width" (breaks both columns) if it's
+        # wide relative to the page, OR if it straddles the column
+        # midpoint -- catches short, centered titles that don't meet
+        # the width threshold but still aren't part of either column.
+        straddles_split = x0 < col_split < x1
+        if width >= full_width_threshold or straddles_split:
+            output.extend(left_buf)
+            output.extend(right_buf)
+            left_buf, right_buf = [], []
+            output.append(line)
+        else:
+            center = (x0 + x1) / 2
+            (left_buf if center < col_split else right_buf).append(line)
+
+    output.extend(left_buf)
+    output.extend(right_buf)
+    return output
+
+
+def get_page_lines(page, layout: bool = False) -> list[dict]:
+    """
+    Extract each line of text on a page along with its max font size and
+    whether it's bold, using PyMuPDF's structured dict output. This is
+    the basis for both plain text assembly and heading detection.
+    """
+    raw = page.get_text("dict")
+    lines = []
+    for block in raw.get("blocks", []):
+        if block.get("type") != 0:  # 0 = text block; skip images
+            continue
+        for line in block.get("lines", []):
+            spans = line.get("spans", [])
+            text = "".join(s["text"] for s in spans).strip()
+            if not text:
+                continue
+            max_size = max(s["size"] for s in spans)
+            is_bold = any(bool(s["flags"] & BOLD_FLAG) for s in spans)
+            lines.append({"bbox": line["bbox"], "text": text, "size": max_size, "bold": is_bold})
+
+    if layout:
+        lines = reorder_columns(lines, page.rect.width)
+
+    return lines
+
+
+def compute_body_size(doc, layout: bool = False) -> float:
+    """
+    First pass over the whole document: find the most common font size,
+    weighted by character count. This is used as the "body text"
+    baseline that headings are measured against.
+    """
+    counter: Counter = Counter()
+    for page in doc:
+        for line in get_page_lines(page, layout=layout):
+            counter[round(line["size"], 1)] += len(line["text"])
+    if not counter:
+        return 10.0
+    return counter.most_common(1)[0][0]
+
+
+def heading_prefix(line: dict, body_size: float) -> str:
+    """
+    Decide whether a line looks like a heading based on its size/weight
+    relative to the document's body-text baseline, and if so, return
+    the markdown prefix ("# ", "## ", "### ") to use. Returns "" for
+    ordinary body text.
+
+    Short-line requirement guards against large pull-quotes/callouts
+    being mistaken for headings.
+    """
+    if body_size <= 0:
+        return ""
+    ratio = line["size"] / body_size
+    word_count = len(line["text"].split())
+    if word_count > 12:
+        return ""
+
+    if ratio >= 1.8:
+        return "# "
+    if ratio >= 1.4:
+        return "## "
+    if ratio >= 1.15 or (line["bold"] and ratio >= 1.05):
+        return "### "
+    return ""
 
 
 def extract(
@@ -95,7 +211,6 @@ def extract(
     out_path: Path,
     layout: bool = False,
     split_dir: Path | None = None,
-    detect_printed_page: bool = False,
     page_offset: int = 0,
 ) -> None:
     doc = fitz.open(pdf_path)
@@ -106,30 +221,28 @@ def extract(
 
     empty_pages = []
 
+    print("Analyzing fonts to find body text baseline...", file=sys.stderr)
+    body_size = compute_body_size(doc, layout=layout)
+    total_pages = len(doc)
+
     for i, page in enumerate(doc, start=1):
-        mode = "text" if not layout else "blocks"
-        if mode == "text":
-            text = page.get_text("text")
-        else:
-            # Reconstruct rough reading order from block coordinates --
-            # helps somewhat on multi-column pages. Still spot-check output.
-            blocks = page.get_text("blocks")
-            blocks.sort(key=lambda b: (round(b[1] / 20), b[0]))  # y-band, then x
-            text = "\n".join(b[4] for b in blocks if b[4].strip())
+        print(f"\rProcessing page {i}/{total_pages} ({i * 100 // total_pages}%)", end="", file=sys.stderr, flush=True)
+
+        lines = get_page_lines(page, layout=layout)
+
+        out_lines = []
+        for line in lines:
+            prefix = heading_prefix(line, body_size)
+            out_lines.append(f"{prefix}{line['text']}")
+        text = "\n".join(out_lines)
 
         if not text.strip():
             empty_pages.append(i)
 
         header = f"<!-- pdf_page: {i} -->"
 
-        if page_offset:
-            printed = i - page_offset
-            header += f"\n<!-- printed_page: {printed if printed >= 1 else 'front-matter'} -->"
-
-        if detect_printed_page:
-            guess = guess_printed_page_number(text)
-            if guess:
-                header += f"\n<!-- printed_page_guess: {guess} -->"
+        printed = i - page_offset
+        header += f"\n<!-- printed_page: {printed if printed >= 1 else 'front-matter'} -->"
 
         chunk = f"{header}\n{text.strip()}\n"
         chunks.append(chunk)
@@ -139,7 +252,9 @@ def extract(
 
     out_path.write_text("\n".join(chunks), encoding="utf-8")
 
+    print(file=sys.stderr)  # newline after the \r progress line
     print(f"Wrote {len(chunks)} pages to {out_path}")
+    print(f"Detected body text size: {body_size}pt (headings are sized/weighted relative to this)")
     if split_dir:
         print(f"Also wrote per-page files to {split_dir}/")
     if empty_pages:
@@ -157,18 +272,15 @@ def main():
     parser.add_argument(
         "--layout",
         action="store_true",
-        help="Use block-sorting mode for better multi-column reading order (slower, still imperfect)",
+        help="Detect left/right columns and read each one top-to-bottom in full "
+        "before moving to the next, instead of the raw PDF content-stream order. "
+        "Use this for multi-column rulebooks.",
     )
     parser.add_argument(
         "--split-dir",
         type=Path,
         default=None,
         help="Also write one .txt file per page into this directory",
-    )
-    parser.add_argument(
-        "--detect-printed-page",
-        action="store_true",
-        help="Best-effort guess at the printed page number from header/footer text (heuristic, verify manually)",
     )
     parser.add_argument(
         "--page-offset",
@@ -208,7 +320,6 @@ def main():
         args.out_path,
         layout=args.layout,
         split_dir=args.split_dir,
-        detect_printed_page=args.detect_printed_page,
         page_offset=page_offset,
     )
 
