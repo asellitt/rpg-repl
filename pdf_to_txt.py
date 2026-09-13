@@ -10,6 +10,8 @@ Usage:
     python3 pdf_to_tagged_text.py input.pdf output.txt
     python3 pdf_to_tagged_text.py input.pdf output.txt --layout
     python3 pdf_to_tagged_text.py input.pdf output.txt --split-dir pages/
+    python3 pdf_to_tagged_text.py input.pdf output.txt --page-offset 4
+    python3 pdf_to_tagged_text.py input.pdf output.txt --known-pair 5=1
 
 Output format:
     Each page is wrapped like this, so downstream tools/agents can
@@ -21,10 +23,32 @@ Output format:
         <!-- pdf_page: 2 -->
         ...extracted text for page 2...
 
+    If --page-offset is given, a second tag is added with the computed
+    printed page number:
+
+        <!-- pdf_page: 5 -->
+        <!-- printed_page: 1 -->
+        ...extracted text for page 5...
+
 Notes:
     - "pdf_page" is the 1-indexed position in the FILE, not necessarily
       the printed page number in the book (front matter, chapter-based
-      numbering, etc. can offset this). See --detect-printed-page below.
+      numbering, etc. can offset this).
+    - Use --page-offset when the book's printed page numbers are a
+      constant amount behind the file's page count (e.g. a cover and
+      table of contents push everything back by N pages). The offset
+      is: pdf_page_number - printed_page_number.
+    - Easier alternative: --known-pair PDF_PAGE=PRINTED_PAGE lets you
+      give one known pair (e.g. "5=1" if PDF page 5 is printed page 1)
+      and the offset is computed for you. Use whichever pair is
+      convenient to check by eye -- doesn't have to be page 1.
+    - This only works for a CONSTANT offset. If numbering resets or
+      shifts partway through (common with chapter-based numbering, or
+      unnumbered inserts), you'll need --detect-printed-page instead,
+      or a per-section offset table.
+    - Pages that fall before printed page 1 (i.e. the front matter
+      itself) are tagged as printed_page: front-matter rather than a
+      negative or zero number.
     - If a page has zero extractable text, this usually means the PDF
       is scanned/image-based. The tag will still be written, but the
       body will be empty -- that's a signal to fall back to OCR or
@@ -72,6 +96,7 @@ def extract(
     layout: bool = False,
     split_dir: Path | None = None,
     detect_printed_page: bool = False,
+    page_offset: int = 0,
 ) -> None:
     doc = fitz.open(pdf_path)
     chunks = []
@@ -96,6 +121,11 @@ def extract(
             empty_pages.append(i)
 
         header = f"<!-- pdf_page: {i} -->"
+
+        if page_offset:
+            printed = i - page_offset
+            header += f"\n<!-- printed_page: {printed if printed >= 1 else 'front-matter'} -->"
+
         if detect_printed_page:
             guess = guess_printed_page_number(text)
             if guess:
@@ -140,7 +170,35 @@ def main():
         action="store_true",
         help="Best-effort guess at the printed page number from header/footer text (heuristic, verify manually)",
     )
+    parser.add_argument(
+        "--page-offset",
+        type=int,
+        default=0,
+        help="Constant offset: pdf_page_number - printed_page_number. "
+        "E.g. if PDF page 5 is printed page 1, pass 4.",
+    )
+    parser.add_argument(
+        "--known-pair",
+        type=str,
+        default=None,
+        metavar="PDF_PAGE=PRINTED_PAGE",
+        help="Compute the offset from one known pair instead of doing the "
+        "subtraction yourself, e.g. --known-pair 5=1",
+    )
     args = parser.parse_args()
+
+    page_offset = args.page_offset
+    if args.known_pair:
+        if args.page_offset:
+            sys.exit("Use either --page-offset or --known-pair, not both.")
+        try:
+            pdf_page_str, printed_page_str = args.known_pair.split("=")
+            page_offset = int(pdf_page_str) - int(printed_page_str)
+        except ValueError:
+            sys.exit(
+                f"--known-pair must look like PDF_PAGE=PRINTED_PAGE "
+                f"(e.g. 5=1), got: {args.known_pair!r}"
+            )
 
     if not args.pdf_path.exists():
         sys.exit(f"File not found: {args.pdf_path}")
@@ -151,6 +209,7 @@ def main():
         layout=args.layout,
         split_dir=args.split_dir,
         detect_printed_page=args.detect_printed_page,
+        page_offset=page_offset,
     )
 
 
