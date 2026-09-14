@@ -50,6 +50,21 @@ Heading detection (automatic, no flag needed):
     idiosyncratic stat-block titles) -- spot check a sample of pages
     against the source PDF, especially chapter openers and sidebars.
 
+Running heads / footers (automatic):
+    The first pass also finds "page furniture": lines near the very
+    top or bottom of the page whose text (with digits collapsed, so
+    page numbers match each other) repeats across several pages.
+    These are dropped from the output entirely -- otherwise a corner
+    footer gets bucketed into a column and lands mid-sentence in the
+    extracted text. The detected patterns are printed to stderr at the
+    end of the run so false positives can be spotted.
+
+Dehyphenation (automatic):
+    A body line ending in "-" whose next body line starts with a
+    lowercase letter is joined (hyphen removed). Column layouts
+    hyphenate aggressively, and unjoined fragments pollute grep
+    results in the extracted text. Heading lines are never joined.
+
 Notes:
     - "pdf_page" is the 1-indexed position in the FILE, not necessarily
       the printed page number in the book (front matter, chapter-based
@@ -77,6 +92,7 @@ Notes:
 """
 
 import argparse
+import re
 import sys
 from collections import Counter
 from pathlib import Path
@@ -91,6 +107,19 @@ except ImportError:
     )
 
 BOLD_FLAG = 1 << 4  # PyMuPDF span flags bit for bold
+
+# Fraction of the page height at the top and bottom treated as the
+# running-head/footer band for furniture detection.
+FURNITURE_BAND = 0.08
+# A band line's normalized text must appear on at least this many pages
+# to be treated as furniture.
+FURNITURE_MIN_PAGES = 3
+
+
+def normalize_furniture(text: str) -> str:
+    """Collapse digits so 'page 142' and 'page 17' count as the same
+    furniture pattern, then case-fold."""
+    return re.sub(r"\d+", "#", text).strip().lower()
 
 
 def reorder_columns(lines: list[dict], page_width: float) -> list[dict]:
@@ -108,10 +137,26 @@ def reorder_columns(lines: list[dict], page_width: float) -> list[dict]:
     order, before the full-width line itself is emitted. This handles
     the common pattern of a heading interrupting two columns partway
     down the page, not just a single header/footer at the very top.
+
+    The column split point is derived from the page's actual text
+    extent, not the page rectangle -- asymmetric/mirrored margins move
+    the gutter off the page midpoint, and a split point sitting inside
+    one column's text misbuckets lines and triggers spurious flushes.
+    For the same reason, "straddles the split" requires meaningful
+    overlap on BOTH sides, so a justified line poking a point or two
+    past the split doesn't fracture the columns.
     """
+    if not lines:
+        return lines
+
+    min_x0 = min(l["bbox"][0] for l in lines)
+    max_x1 = max(l["bbox"][2] for l in lines)
+    text_width = max_x1 - min_x0
+    col_split = (min_x0 + max_x1) / 2
+    full_width_threshold = 0.6 * text_width
+    straddle_margin = 0.03 * page_width
+
     sorted_lines = sorted(lines, key=lambda l: l["bbox"][1])
-    full_width_threshold = 0.6 * page_width
-    col_split = page_width / 2
 
     output: list[dict] = []
     left_buf: list[dict] = []
@@ -121,10 +166,13 @@ def reorder_columns(lines: list[dict], page_width: float) -> list[dict]:
         x0, _, x1, _ = line["bbox"]
         width = x1 - x0
         # A line counts as "full width" (breaks both columns) if it's
-        # wide relative to the page, OR if it straddles the column
-        # midpoint -- catches short, centered titles that don't meet
-        # the width threshold but still aren't part of either column.
-        straddles_split = x0 < col_split < x1
+        # wide relative to the text area, OR if it extends meaningfully
+        # past the column split on both sides -- catches short, centered
+        # titles that don't meet the width threshold but still aren't
+        # part of either column.
+        straddles_split = (
+            x0 < col_split - straddle_margin and x1 > col_split + straddle_margin
+        )
         if width >= full_width_threshold or straddles_split:
             output.extend(left_buf)
             output.extend(right_buf)
@@ -139,13 +187,28 @@ def reorder_columns(lines: list[dict], page_width: float) -> list[dict]:
     return output
 
 
-def get_page_lines(page, layout: bool = False) -> list[dict]:
+def get_page_lines(
+    page,
+    layout: bool = False,
+    furniture: set[str] | None = None,
+) -> list[dict]:
     """
-    Extract each line of text on a page along with its max font size and
+    Extract each line of text on a page along with its font size and
     whether it's bold, using PyMuPDF's structured dict output. This is
     the basis for both plain text assembly and heading detection.
+
+    Size/bold come from the line's dominant span (most text), so a
+    decorative drop cap or ornament span can't inflate a body line
+    into a heading.
+
+    If a furniture set is given, lines in the top/bottom band whose
+    normalized text is in the set are dropped.
     """
     raw = page.get_text("dict")
+    page_height = page.rect.height
+    band_top = FURNITURE_BAND * page_height
+    band_bottom = (1 - FURNITURE_BAND) * page_height
+
     lines = []
     for block in raw.get("blocks", []):
         if block.get("type") != 0:  # 0 = text block; skip images
@@ -155,9 +218,22 @@ def get_page_lines(page, layout: bool = False) -> list[dict]:
             text = "".join(s["text"] for s in spans).strip()
             if not text:
                 continue
-            max_size = max(s["size"] for s in spans)
-            is_bold = any(bool(s["flags"] & BOLD_FLAG) for s in spans)
-            lines.append({"bbox": line["bbox"], "text": text, "size": max_size, "bold": is_bold})
+
+            if furniture is not None:
+                y_center = (line["bbox"][1] + line["bbox"][3]) / 2
+                in_band = y_center < band_top or y_center > band_bottom
+                if in_band and normalize_furniture(text) in furniture:
+                    continue
+
+            dominant = max(spans, key=lambda s: len(s["text"].strip()))
+            lines.append(
+                {
+                    "bbox": line["bbox"],
+                    "text": text,
+                    "size": dominant["size"],
+                    "bold": bool(dominant["flags"] & BOLD_FLAG),
+                }
+            )
 
     if layout:
         lines = reorder_columns(lines, page.rect.width)
@@ -165,19 +241,40 @@ def get_page_lines(page, layout: bool = False) -> list[dict]:
     return lines
 
 
-def compute_body_size(doc, layout: bool = False) -> float:
+def analyze_document(doc) -> tuple[float, set[str]]:
     """
-    First pass over the whole document: find the most common font size,
-    weighted by character count. This is used as the "body text"
-    baseline that headings are measured against.
+    First pass over the whole document. Two things come out of it:
+
+    - The most common font size, weighted by character count: the
+      "body text" baseline that headings are measured against.
+    - The furniture set: normalized text of lines in the top/bottom
+      band that recur on at least FURNITURE_MIN_PAGES pages (running
+      heads, footers, page numbers -- digits are collapsed so page
+      numbers match each other).
+
+    Column reordering is skipped here since neither result depends on
+    line order.
     """
-    counter: Counter = Counter()
-    for page in doc:
-        for line in get_page_lines(page, layout=layout):
-            counter[round(line["size"], 1)] += len(line["text"])
-    if not counter:
-        return 10.0
-    return counter.most_common(1)[0][0]
+    size_counter: Counter = Counter()
+    band_pages: dict[str, set[int]] = {}
+
+    for page_index, page in enumerate(doc):
+        page_height = page.rect.height
+        band_top = FURNITURE_BAND * page_height
+        band_bottom = (1 - FURNITURE_BAND) * page_height
+        for line in get_page_lines(page):
+            size_counter[round(line["size"], 1)] += len(line["text"])
+            y_center = (line["bbox"][1] + line["bbox"][3]) / 2
+            if y_center < band_top or y_center > band_bottom:
+                band_pages.setdefault(normalize_furniture(line["text"]), set()).add(
+                    page_index
+                )
+
+    body_size = size_counter.most_common(1)[0][0] if size_counter else 10.0
+    furniture = {
+        text for text, pages in band_pages.items() if len(pages) >= FURNITURE_MIN_PAGES
+    }
+    return body_size, furniture
 
 
 def heading_prefix(line: dict, body_size: float) -> str:
@@ -206,6 +303,29 @@ def heading_prefix(line: dict, body_size: float) -> str:
     return ""
 
 
+def assemble_page_text(lines: list[dict], body_size: float) -> str:
+    """
+    Turn a page's ordered lines into output text: apply heading
+    prefixes, and join hyphenated line breaks (a body line ending in
+    "-" followed by a body line starting with a lowercase letter).
+    """
+    out_lines: list[str] = []
+    for line in lines:
+        prefix = heading_prefix(line, body_size)
+        text = line["text"]
+        if (
+            not prefix
+            and out_lines
+            and not out_lines[-1].startswith("#")
+            and out_lines[-1].endswith("-")
+            and text[:1].islower()
+        ):
+            out_lines[-1] = out_lines[-1][:-1] + text
+            continue
+        out_lines.append(f"{prefix}{text}")
+    return "\n".join(out_lines)
+
+
 def extract(
     pdf_path: Path,
     out_path: Path,
@@ -221,20 +341,15 @@ def extract(
 
     empty_pages = []
 
-    print("Analyzing fonts to find body text baseline...", file=sys.stderr)
-    body_size = compute_body_size(doc, layout=layout)
+    print("Analyzing fonts and page furniture...", file=sys.stderr)
+    body_size, furniture = analyze_document(doc)
     total_pages = len(doc)
 
     for i, page in enumerate(doc, start=1):
         print(f"\rProcessing page {i}/{total_pages} ({i * 100 // total_pages}%)", end="", file=sys.stderr, flush=True)
 
-        lines = get_page_lines(page, layout=layout)
-
-        out_lines = []
-        for line in lines:
-            prefix = heading_prefix(line, body_size)
-            out_lines.append(f"{prefix}{line['text']}")
-        text = "\n".join(out_lines)
+        lines = get_page_lines(page, layout=layout, furniture=furniture)
+        text = assemble_page_text(lines, body_size)
 
         if not text.strip():
             empty_pages.append(i)
@@ -255,6 +370,13 @@ def extract(
     print(file=sys.stderr)  # newline after the \r progress line
     print(f"Wrote {len(chunks)} pages to {out_path}")
     print(f"Detected body text size: {body_size}pt (headings are sized/weighted relative to this)")
+    if furniture:
+        print(
+            f"Dropped {len(furniture)} running-head/footer pattern(s) "
+            f"(digits shown as #) -- check none are real content:"
+        )
+        for pattern in sorted(furniture):
+            print(f"  {pattern!r}")
     if split_dir:
         print(f"Also wrote per-page files to {split_dir}/")
     if empty_pages:
@@ -326,3 +448,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
