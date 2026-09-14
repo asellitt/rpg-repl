@@ -97,6 +97,7 @@ Notes:
 """
 
 import argparse
+import json
 import re
 import sys
 from collections import Counter
@@ -370,6 +371,18 @@ def assemble_page_text(lines: list[dict], body_size: float) -> str:
     return "\n".join(out_lines)
 
 
+def write_book_json(out_path: Path, title: str, page_offset: int) -> None:
+    book_json = out_path.parent / "book.json"
+    if book_json.exists():
+        print(f"NOTE: {book_json} already exists; not overwriting it.")
+        return
+    book_json.write_text(
+        json.dumps({"title": title, "page_offset": page_offset}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    print(f"Wrote {book_json}")
+
+
 def extract(
     pdf_path: Path,
     out_path: Path,
@@ -377,6 +390,7 @@ def extract(
     split_dir: Path | None = None,
     page_offset: int = 0,
     not_furniture: list[str] | None = None,
+    title: str | None = None,
 ) -> None:
     doc = fitz.open(pdf_path)
     chunks = []
@@ -418,6 +432,8 @@ def extract(
 
     print(file=sys.stderr)  # newline after the \r progress line
     print(f"Wrote {len(chunks)} pages to {out_path}")
+    if title:
+        write_book_json(out_path, title, page_offset)
     print(f"Detected body text size: {body_size}pt (headings are sized/weighted relative to this)")
     if furniture_pages:
         print(
@@ -468,6 +484,12 @@ def main():
         "E.g. if PDF page 5 is printed page 1, pass 4.",
     )
     parser.add_argument(
+        "--title",
+        default=None,
+        help="Book title; when given, writes book.json ({title, page_offset}) "
+        "next to the output file for the run_chapters.py pipeline.",
+    )
+    parser.add_argument(
         "--not-furniture",
         action="append",
         default=[],
@@ -509,6 +531,7 @@ def main():
         split_dir=args.split_dir,
         page_offset=page_offset,
         not_furniture=args.not_furniture,
+        title=args.title,
     )
 
 

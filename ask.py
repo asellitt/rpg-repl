@@ -198,8 +198,10 @@ Vault layout:
 - Notes reference each other with [[wikilinks]].
 
 Workflow for every question:
-1. search_vault for the key terms (note names and aliases are indexed;
-   try synonyms if the first search misses).
+1. search_vault for the key terms (note names, aliases, and content are
+   indexed; multi-word queries match notes containing all the words, and
+   the result labels how each hit matched). Try synonyms if a search
+   misses.
 2. read_note the most relevant hits in full.
 3. Follow [[wikilinks]] to related notes when the answer spans concepts.
 
@@ -307,27 +309,59 @@ def build_name_map() -> dict[str, Path]:
     return names
 
 
+STOPWORDS = {
+    "the", "a", "an", "of", "for", "and", "or", "in", "on", "to", "is",
+    "are", "what", "how", "does", "do", "can", "with", "my", "your",
+}
+
+
 def search_vault(query: str) -> str:
-    query_lower = query.lower()
+    query_lower = query.lower().strip()
+    tokens = [
+        t for t in re.findall(r"[a-z0-9']+", query_lower) if t not in STOPWORDS
+    ] or [query_lower]
     hits: list[str] = []
+
+    # Tier 1: note names/aliases containing the phrase or all terms.
     name_matches: list[Path] = []
     for name, path in sorted(NAME_MAP.items(), key=lambda kv: str(kv[1])):
-        if query_lower in name and path not in name_matches:
+        if (query_lower in name or all(t in name for t in tokens)) and path not in name_matches:
             name_matches.append(path)
             hits.append(f"NOTE MATCH: {path.relative_to(VAULT)}")
 
+    # Tier 2: lines containing the phrase or all terms.
     truncated = False
+    note_texts: dict[Path, str] = {}
     for note in sorted(VAULT.rglob("*.md")):
         if note.parent.name == "_meta":
             continue
-        for line in note.read_text(encoding="utf-8").splitlines():
-            if query_lower in line.lower():
+        text = note.read_text(encoding="utf-8")
+        note_texts[note] = text.lower()
+        for line in text.splitlines():
+            line_lower = line.lower()
+            if query_lower in line_lower or all(t in line_lower for t in tokens):
                 if len(hits) < MAX_SEARCH_LINES:
                     hits.append(f"{note.relative_to(VAULT)}: {line.strip()}")
                 else:
                     truncated = True
     if truncated:
         hits.append("... (more hits truncated; refine the query)")
+
+    # Tier 3: all terms somewhere in one note (spread across lines).
+    if not hits:
+        spread = [n for n, t in note_texts.items() if all(tok in t for tok in tokens)]
+        hits.extend(f"ALL TERMS IN NOTE: {n.relative_to(VAULT)}" for n in spread[:10])
+
+    # Tier 4: per-term name/alias matches, so one good term still leads
+    # somewhere even when the other terms don't appear verbatim.
+    if not hits:
+        for token in tokens:
+            matches = sorted(
+                {str(p.relative_to(VAULT)) for name, p in NAME_MAP.items() if token in name}
+            )[:5]
+            if matches:
+                hits.append(f"NOTES MATCHING '{token}': " + ", ".join(matches))
+
     if not hits:
         return f"No matches for '{query}'. Try a synonym or a broader term."
     return "\n".join(hits)
