@@ -1,4 +1,8 @@
 .venv
 input/
 output/
-vault/
+
+books/
+systems/
+__pycache__/
+

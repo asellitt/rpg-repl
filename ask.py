@@ -24,7 +24,8 @@ except ImportError:
     sys.exit("The ollama python client is not installed. Run: pip install ollama")
 
 ROOT = Path(__file__).resolve().parent
-VAULT = ROOT / "vault"
+SYSTEMS = ROOT / "systems"
+VAULT = SYSTEMS / "cosmere"
 MAX_TURNS = 12
 MAX_SEARCH_LINES = 25
 
@@ -158,11 +159,15 @@ def print_sources(content: str) -> None:
     cites = []
     for path in cited:
         text = path.read_text(encoding="utf-8")
-        pages = re.search(r'^pages:\s*"?([^"\n]+?)"?\s*$', text, re.MULTILINE)
-        source = re.search(r"^source:\s*(\S+)\s*$", text, re.MULTILINE)
-        if pages:
-            book = f"{book_name(source.group(1))} " if source else ""
-            cites.append(f"{path.stem} ({book}p. {pages.group(1)})")
+        sources = re.search(r"^sources:\s*\[(.*)\]\s*$", text, re.MULTILINE)
+        if not sources:
+            continue
+        parts = []
+        for entry in re.findall(r'"([^"]+)"', sources.group(1)):
+            slug, _, pages = entry.partition(":")
+            parts.append(f"{book_name(slug.strip())} p. {pages.strip()}")
+        if parts:
+            cites.append(f"{path.stem} ({'; '.join(parts)})")
     if cites:
         print(f"{DIM}Sources: {'; '.join(cites)}{RESET}")
 
@@ -185,8 +190,9 @@ Obsidian vault of rules notes. The vault is the only source of truth —
 never answer from general knowledge.
 
 Vault layout:
-- rules/: one note per rule/concept. Frontmatter carries aliases,
-  tags, and the printed book pages the note cites.
+- rules/: one note per rule/concept. Frontmatter carries aliases, tags,
+  and sources — the book(s) and printed pages the note cites, as
+  entries like "stormlight-handbook: 142-143".
 - _index/: one map-of-content note per book chapter, listing that
   chapter's notes.
 - Notes reference each other with [[wikilinks]].
@@ -215,7 +221,30 @@ Answering rules:
 """
 
 SYSTEM_PROMPT = SYSTEM_PROMPT_TEMPLATE.format(rpg="cosmere")
-RPG_NAME = "rules"
+RPG_NAME = "cosmere"
+
+
+def available_systems() -> list[str]:
+    if not SYSTEMS.is_dir():
+        return []
+    return sorted(
+        p.name for p in SYSTEMS.iterdir() if p.is_dir() and not p.name.startswith(".")
+    )
+
+
+def load_system(name: str) -> bool:
+    """Point the agent at systems/<name>; returns False if it doesn't exist."""
+    global VAULT, RPG_NAME, SYSTEM_PROMPT, NAME_MAP
+    path = SYSTEMS / name
+    if not path.is_dir():
+        return False
+    VAULT = path
+    RPG_NAME = name
+    SYSTEM_PROMPT = SYSTEM_PROMPT_TEMPLATE.format(rpg=name)
+    NAME_MAP = build_name_map()
+    BOOK_NAMES.clear()
+    print(f"({name}: {len(NAME_MAP)} note names/aliases indexed)", file=sys.stderr)
+    return True
 
 TOOLS = [
     {
@@ -378,24 +407,19 @@ def main() -> None:
     parser.add_argument("--model", default="qwen2.5:14b")
     parser.add_argument("--ctx", type=int, default=8192,
                         help="context window tokens (lower = faster/less RAM)")
-    parser.add_argument("--vault", type=Path, default=VAULT,
-                        help="vault directory (one per RPG system)")
+    parser.add_argument("--system", default="cosmere",
+                        help="RPG system directory under systems/")
     args = parser.parse_args()
 
-    VAULT = args.vault.resolve()
-    if not VAULT.is_dir():
-        sys.exit(f"No vault at {VAULT}")
-    rpg_file = VAULT / "_meta" / "rpg.txt"
-    RPG_NAME = rpg_file.read_text(encoding="utf-8").strip() if rpg_file.exists() else "rules"
-    SYSTEM_PROMPT = SYSTEM_PROMPT_TEMPLATE.format(rpg=RPG_NAME)
-    NAME_MAP = build_name_map()
-    print(f"({RPG_NAME}: {len(NAME_MAP)} note names/aliases indexed)", file=sys.stderr)
+    if not load_system(args.system):
+        sys.exit(f"No system '{args.system}' under {SYSTEMS} (available: {available_systems()})")
 
     if args.question:
         answer(" ".join(args.question), args.model, ctx=args.ctx)
         return
     print("Conversational REPL: follow-ups keep context. "
-          "/2 or /open NAME shows a linked note, /clear resets, q quits.", file=sys.stderr)
+          "/2 or /open NAME shows a linked note, /system NAME switches "
+          "system, /clear resets, q quits.", file=sys.stderr)
     messages: list = [{"role": "system", "content": SYSTEM_PROMPT}]
     while True:
         try:
@@ -410,6 +434,16 @@ def main() -> None:
         if question == "/clear":
             messages = [{"role": "system", "content": SYSTEM_PROMPT}]
             print("(context cleared)", file=sys.stderr)
+            continue
+        if question.startswith("/system"):
+            name = question[7:].strip()
+            if not name:
+                print(f"Current system: {RPG_NAME}. Available: {', '.join(available_systems())}")
+            elif load_system(name):
+                messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+                print("(context cleared)", file=sys.stderr)
+            else:
+                print(f"No system '{name}'. Available: {', '.join(available_systems())}")
             continue
         if question.startswith("/open "):
             open_note(question[6:].strip())

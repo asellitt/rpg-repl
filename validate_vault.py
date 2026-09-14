@@ -4,9 +4,10 @@ Validate the vault: frontmatter completeness, H1/filename agreement,
 and wikilink resolution.
 
 Usage:
-    python3 validate_vault.py            # validate everything
-    python3 validate_vault.py --links    # also print every unresolved link
-    python3 validate_vault.py --fix      # first unwrap line-wrapped wikilinks
+    python3 validate_vault.py                    # validate the default system
+    python3 validate_vault.py --system cosmere   # validate one system's vault
+    python3 validate_vault.py --links            # also print every unresolved link
+    python3 validate_vault.py --fix              # first unwrap line-wrapped wikilinks
 
 Exit code 1 on hard failures (bad frontmatter, H1 mismatch), 0 otherwise.
 Unresolved wikilinks are informational -- forward links are expected
@@ -19,8 +20,9 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-VAULT = ROOT / "vault"
-REQUIRED_KEYS = ("aliases", "tags", "source", "pages", "pdf_pages")
+SYSTEMS = ROOT / "systems"
+VAULT = SYSTEMS / "cosmere"
+REQUIRED_KEYS = ("aliases", "tags", "sources")
 
 FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
 WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)")
@@ -57,10 +59,17 @@ def parse_aliases(value: str) -> list[str]:
 
 
 def main() -> int:
+    global VAULT
     parser = argparse.ArgumentParser()
     parser.add_argument("--links", action="store_true", help="print every unresolved wikilink")
     parser.add_argument("--fix", action="store_true", help="unwrap line-wrapped wikilinks first")
+    parser.add_argument("--system", default="cosmere", help="system vault under systems/")
     args = parser.parse_args()
+
+    VAULT = SYSTEMS / args.system
+    if not VAULT.is_dir():
+        print(f"No system at {VAULT}")
+        return 1
 
     if args.fix:
         for note in sorted(VAULT.rglob("*.md")):
@@ -75,6 +84,9 @@ def main() -> int:
     failures: list[str] = []
     link_targets: set[str] = set()
     all_links: dict[str, list[str]] = {}
+
+    for moc in VAULT.glob("_index/*.md"):
+        link_targets.add(moc.stem.lower())
 
     notes = sorted(VAULT.glob("rules/*.md")) + sorted(VAULT.glob("_sources/*.md"))
     for note in notes:
@@ -103,7 +115,9 @@ def main() -> int:
         if note.parent.name == "_meta":  # conventions contain template examples
             continue
         rel = str(note.relative_to(ROOT))
-        for target in WIKILINK_RE.findall(note.read_text(encoding="utf-8")):
+        # Obsidian escapes pipes as \| inside tables; normalize before parsing.
+        text = note.read_text(encoding="utf-8").replace("\\|", "|")
+        for target in WIKILINK_RE.findall(text):
             if "\n" in target:
                 failures.append(f"{rel}: line-wrapped wikilink [[{target.splitlines()[0]}...]]")
                 continue
