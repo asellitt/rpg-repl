@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-pdf_to_tagged_text.py
+transcribe_pdf.py
 
 Phase 1 of PDF -> markdown pipeline: extract text from a PDF, page by page,
 with page-number tags so a later LLM transcription pass can preserve
 citeable page references.
 
 Usage:
-    python3 pdf_to_tagged_text.py input.pdf output.txt
-    python3 pdf_to_tagged_text.py input.pdf output.txt --layout
-    python3 pdf_to_tagged_text.py input.pdf output.txt --split-dir pages/
-    python3 pdf_to_tagged_text.py input.pdf output.txt --page-offset 4
-    python3 pdf_to_tagged_text.py input.pdf output.txt --known-pair 5=1
+    python3 transcribe_pdf.py input.pdf output.txt
+    python3 transcribe_pdf.py input.pdf output.txt --layout
+    python3 transcribe_pdf.py input.pdf output.txt --split-dir pages/
+    python3 transcribe_pdf.py input.pdf output.txt --page-offset 4
+    python3 transcribe_pdf.py input.pdf output.txt --known-pair 5=1
 
 Output format:
     Each page is wrapped like this, so downstream tools/agents can
@@ -53,11 +53,16 @@ Heading detection (automatic, no flag needed):
 Running heads / footers (automatic):
     The first pass also finds "page furniture": lines near the very
     top or bottom of the page whose text (with digits collapsed, so
-    page numbers match each other) repeats across several pages.
-    These are dropped from the output entirely -- otherwise a corner
-    footer gets bucketed into a column and lands mid-sentence in the
-    extracted text. The detected patterns are printed to stderr at the
-    end of the run so false positives can be spotted.
+    page numbers match each other) repeats across several pages AT THE
+    SAME vertical position. These are dropped from the output entirely
+    -- otherwise a corner footer gets bucketed into a column and lands
+    mid-sentence in the extracted text. The fixed-y requirement keeps
+    repeated BODY text safe (a formulaic sentence that happens to fall
+    near the page edge on several pages sits at varying heights).
+    The detected patterns are printed at the end of the run with the
+    printed (book) pages they were seen on, using the same offset as
+    the printed_page tags -- check them against the source, and re-run
+    with --not-furniture TEXT to keep any false positive.
 
 Dehyphenation (automatic):
     A body line ending in "-" whose next body line starts with a
@@ -98,13 +103,16 @@ from collections import Counter
 from pathlib import Path
 
 try:
-    import fitz  # PyMuPDF
+    import pymupdf as fitz
 except ImportError:
-    sys.exit(
-        "PyMuPDF is not installed. Install it with:\n"
-        "    pip install pymupdf --break-system-packages\n"
-        "(or just: pip install pymupdf, if you're not on a system-managed env)"
-    )
+    try:
+        import fitz  # older PyMuPDF only exposes the fitz name
+    except ImportError:
+        sys.exit(
+            "PyMuPDF is not installed. Install it with:\n"
+            "    pip install pymupdf --break-system-packages\n"
+            "(or just: pip install pymupdf, if you're not on a system-managed env)"
+        )
 
 BOLD_FLAG = 1 << 4  # PyMuPDF span flags bit for bold
 
@@ -114,6 +122,14 @@ FURNITURE_BAND = 0.08
 # A band line's normalized text must appear on at least this many pages
 # to be treated as furniture.
 FURNITURE_MIN_PAGES = 3
+# Real furniture sits at a fixed vertical position; occurrences are
+# grouped into clusters no looser than this many points, and only a
+# cluster with enough pages qualifies. Repeated body text at varying
+# heights never clusters, so it survives.
+FURNITURE_Y_CLUSTER = 2.0
+# At drop time, a line must sit within this many points of a
+# qualifying cluster's position.
+FURNITURE_Y_MATCH = 3.0
 
 
 def normalize_furniture(text: str) -> str:
@@ -190,7 +206,7 @@ def reorder_columns(lines: list[dict], page_width: float) -> list[dict]:
 def get_page_lines(
     page,
     layout: bool = False,
-    furniture: set[str] | None = None,
+    furniture: dict[str, list[float]] | None = None,
 ) -> list[dict]:
     """
     Extract each line of text on a page along with its font size and
@@ -201,8 +217,9 @@ def get_page_lines(
     decorative drop cap or ornament span can't inflate a body line
     into a heading.
 
-    If a furniture set is given, lines in the top/bottom band whose
-    normalized text is in the set are dropped.
+    If a furniture map (normalized text -> qualifying y positions) is
+    given, lines in the top/bottom band whose normalized text matches
+    AND that sit at one of those y positions are dropped.
     """
     raw = page.get_text("dict")
     page_height = page.rect.height
@@ -222,8 +239,12 @@ def get_page_lines(
             if furniture is not None:
                 y_center = (line["bbox"][1] + line["bbox"][3]) / 2
                 in_band = y_center < band_top or y_center > band_bottom
-                if in_band and normalize_furniture(text) in furniture:
-                    continue
+                if in_band:
+                    positions = furniture.get(normalize_furniture(text))
+                    if positions is not None and any(
+                        abs(y_center - fy) <= FURNITURE_Y_MATCH for fy in positions
+                    ):
+                        continue
 
             dominant = max(spans, key=lambda s: len(s["text"].strip()))
             lines.append(
@@ -241,24 +262,30 @@ def get_page_lines(
     return lines
 
 
-def analyze_document(doc) -> tuple[float, set[str]]:
+def analyze_document(doc) -> tuple[float, dict[str, list[float]], dict[str, list[int]]]:
     """
     First pass over the whole document. Two things come out of it:
 
     - The most common font size, weighted by character count: the
       "body text" baseline that headings are measured against.
-    - The furniture set: normalized text of lines in the top/bottom
-      band that recur on at least FURNITURE_MIN_PAGES pages (running
-      heads, footers, page numbers -- digits are collapsed so page
-      numbers match each other).
+    - The furniture map: normalized text of lines in the top/bottom
+      band (digits collapsed, so page numbers match each other) that
+      recur on at least FURNITURE_MIN_PAGES pages AT THE SAME vertical
+      position. Running heads, footers, and page numbers sit at a
+      fixed y on every page; repeated body text (e.g. a formulaic
+      sentence that happens to fall near the page edge on several
+      pages) lands at varying heights and is left alone.
+
+    Returns (body_size, furniture y-positions by pattern, pdf pages by
+    pattern -- the latter only for reporting).
 
     Column reordering is skipped here since neither result depends on
     line order.
     """
     size_counter: Counter = Counter()
-    band_pages: dict[str, set[int]] = {}
+    band_hits: dict[str, list[tuple[int, float]]] = {}
 
-    for page_index, page in enumerate(doc):
+    for page_number, page in enumerate(doc, start=1):
         page_height = page.rect.height
         band_top = FURNITURE_BAND * page_height
         band_bottom = (1 - FURNITURE_BAND) * page_height
@@ -266,15 +293,32 @@ def analyze_document(doc) -> tuple[float, set[str]]:
             size_counter[round(line["size"], 1)] += len(line["text"])
             y_center = (line["bbox"][1] + line["bbox"][3]) / 2
             if y_center < band_top or y_center > band_bottom:
-                band_pages.setdefault(normalize_furniture(line["text"]), set()).add(
-                    page_index
+                band_hits.setdefault(normalize_furniture(line["text"]), []).append(
+                    (page_number, y_center)
                 )
 
     body_size = size_counter.most_common(1)[0][0] if size_counter else 10.0
-    furniture = {
-        text for text, pages in band_pages.items() if len(pages) >= FURNITURE_MIN_PAGES
-    }
-    return body_size, furniture
+
+    furniture_positions: dict[str, list[float]] = {}
+    furniture_pages: dict[str, list[int]] = {}
+    for text, hits in band_hits.items():
+        hits.sort(key=lambda h: h[1])
+        clusters: list[list[tuple[int, float]]] = []
+        for page_number, y in hits:
+            if clusters and y - clusters[-1][-1][1] <= FURNITURE_Y_CLUSTER:
+                clusters[-1].append((page_number, y))
+            else:
+                clusters.append([(page_number, y)])
+        for cluster in clusters:
+            pages = sorted({p for p, _ in cluster})
+            if len(pages) >= FURNITURE_MIN_PAGES:
+                ys = [y for _, y in cluster]
+                furniture_positions.setdefault(text, []).append(sum(ys) / len(ys))
+                furniture_pages.setdefault(text, []).extend(pages)
+    for pages in furniture_pages.values():
+        pages.sort()
+
+    return body_size, furniture_positions, furniture_pages
 
 
 def heading_prefix(line: dict, body_size: float) -> str:
@@ -332,6 +376,7 @@ def extract(
     layout: bool = False,
     split_dir: Path | None = None,
     page_offset: int = 0,
+    not_furniture: list[str] | None = None,
 ) -> None:
     doc = fitz.open(pdf_path)
     chunks = []
@@ -342,7 +387,11 @@ def extract(
     empty_pages = []
 
     print("Analyzing fonts and page furniture...", file=sys.stderr)
-    body_size, furniture = analyze_document(doc)
+    body_size, furniture, furniture_pages = analyze_document(doc)
+    for needle in not_furniture or []:
+        for pattern in [p for p in furniture if needle.lower() in p]:
+            del furniture[pattern]
+            del furniture_pages[pattern]
     total_pages = len(doc)
 
     for i, page in enumerate(doc, start=1):
@@ -370,13 +419,20 @@ def extract(
     print(file=sys.stderr)  # newline after the \r progress line
     print(f"Wrote {len(chunks)} pages to {out_path}")
     print(f"Detected body text size: {body_size}pt (headings are sized/weighted relative to this)")
-    if furniture:
+    if furniture_pages:
         print(
-            f"Dropped {len(furniture)} running-head/footer pattern(s) "
-            f"(digits shown as #) -- check none are real content:"
+            f"Dropped {len(furniture_pages)} running-head/footer pattern(s) "
+            f"(digits shown as #) -- check none are real content; re-run with "
+            f"--not-furniture TEXT to keep a false positive:"
         )
-        for pattern in sorted(furniture):
-            print(f"  {pattern!r}")
+        for pattern in sorted(furniture_pages):
+            labels = [
+                str(p - page_offset) if p - page_offset >= 1 else f"front-matter (pdf {p})"
+                for p in furniture_pages[pattern]
+            ]
+            shown = ", ".join(labels[:10])
+            more = f", ... (+{len(labels) - 10} more)" if len(labels) > 10 else ""
+            print(f"  {pattern!r} -- book pages {shown}{more}")
     if split_dir:
         print(f"Also wrote per-page files to {split_dir}/")
     if empty_pages:
@@ -412,6 +468,15 @@ def main():
         "E.g. if PDF page 5 is printed page 1, pass 4.",
     )
     parser.add_argument(
+        "--not-furniture",
+        action="append",
+        default=[],
+        metavar="TEXT",
+        help="Keep any detected running-head/footer pattern containing TEXT "
+        "(case-insensitive substring; repeatable). Use after checking the "
+        "dropped-pattern report for false positives.",
+    )
+    parser.add_argument(
         "--known-pair",
         type=str,
         default=None,
@@ -443,6 +508,7 @@ def main():
         layout=args.layout,
         split_dir=args.split_dir,
         page_offset=page_offset,
+        not_furniture=args.not_furniture,
     )
 
 
