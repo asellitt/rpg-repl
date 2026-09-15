@@ -85,10 +85,16 @@ def main() -> int:
     link_targets: set[str] = set()
     all_links: dict[str, list[str]] = {}
 
+    # Obsidian's click-to-create drops empty notes at the vault root;
+    # notes only belong under a system's notes/, _index/, or _sources/.
+    for stray in list(SYSTEMS.glob("*.md")) + list(VAULT.glob("*.md")):
+        failures.append(f"{stray.relative_to(ROOT)}: stray note outside notes/_index/_sources "
+                        f"(Obsidian click-to-create?)")
+
     for moc in VAULT.glob("_index/*.md"):
         link_targets.add(moc.stem.lower())
 
-    notes = sorted(VAULT.glob("rules/*.md")) + sorted(VAULT.glob("_sources/*.md"))
+    notes = sorted(VAULT.glob("notes/*.md")) + sorted(VAULT.glob("_sources/*.md"))
     for note in notes:
         text = note.read_text(encoding="utf-8")
         rel = note.relative_to(ROOT)
@@ -98,7 +104,7 @@ def main() -> int:
         if fm is None:
             failures.append(f"{rel}: no frontmatter block")
             continue
-        if note.parent.name == "rules":
+        if note.parent.name == "notes":
             for key in REQUIRED_KEYS:
                 if key not in fm or not fm[key]:
                     failures.append(f"{rel}: missing frontmatter key '{key}'")
@@ -108,7 +114,7 @@ def main() -> int:
         h1s = [l[2:].strip() for l in text.splitlines() if l.startswith("# ")]
         if not h1s:
             failures.append(f"{rel}: no H1")
-        elif note.parent.name == "rules" and h1s[0] != note.stem:
+        elif note.parent.name == "notes" and h1s[0] != note.stem:
             failures.append(f"{rel}: H1 '{h1s[0]}' != filename '{note.stem}'")
 
     for note in sorted(VAULT.rglob("*.md")):
@@ -125,9 +131,24 @@ def main() -> int:
 
     unresolved = {t: srcs for t, srcs in all_links.items() if t.lower() not in link_targets}
 
-    note_count = len(list(VAULT.glob("rules/*.md")))
-    print(f"{note_count} rules notes, {len(all_links)} distinct wikilink targets, "
-          f"{len(unresolved)} unresolved")
+    moc_linked: set[str] = set()
+    for moc in VAULT.glob("_index/*.md"):
+        for target in WIKILINK_RE.findall(moc.read_text(encoding="utf-8").replace("\\|", "|")):
+            moc_linked.add(target.strip().lower())
+    uncovered = sorted(
+        n.stem for n in VAULT.glob("notes/*.md") if n.stem.lower() not in moc_linked
+    )
+
+    note_count = len(list(VAULT.glob("notes/*.md")))
+    print(f"{note_count} notes, {len(all_links)} distinct wikilink targets, "
+          f"{len(unresolved)} unresolved, {len(uncovered)} in no MOC")
+
+    if uncovered:
+        print("\nNotes in no MOC (add to a chapter MOC in the postflight pass):")
+        for name in uncovered[:20]:
+            print(f"  {name}")
+        if len(uncovered) > 20:
+            print(f"  ... (+{len(uncovered) - 20} more)")
 
     if unresolved:
         print("\nUnresolved wikilinks (forward links are fine until all chapters land):")

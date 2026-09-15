@@ -14,7 +14,7 @@ Steps, in order:
    note you write. This book's sources entry is:
        sources: ["{book}: <printed pages>"]
 3. Before naming or linking anything, list the existing notes in
-   {vault}/rules/ and check their aliases (grep for `aliases:`). Link to
+   {vault}/notes/ and check their aliases (grep for `aliases:`). Link to
    existing notes under their existing names.
 4. When a concept from this text already has a note (from any book of
    this system): never create a duplicate. If this book restates the
@@ -22,7 +22,7 @@ Steps, in order:
    list (and its Source section). If this book adds genuinely new
    detail, merge it into the existing note under the same citation
    discipline. Concepts unique to this book get new notes as normal.
-5. Write one note per new concept into {vault}/rules/, per the
+5. Write one note per new concept into {vault}/notes/, per the
    conventions. Restate rules faithfully — keep every number, die, DC,
    cost, range, and duration exact. Wikilink the first mention of other
    concepts; forward links to concepts not yet processed are correct

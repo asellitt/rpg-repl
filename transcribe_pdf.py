@@ -395,6 +395,7 @@ def extract(
     doc = fitz.open(pdf_path)
     chunks = []
 
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     if split_dir:
         split_dir.mkdir(parents=True, exist_ok=True)
 

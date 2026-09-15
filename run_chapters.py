@@ -123,7 +123,7 @@ def build_prompt(book: Book, unit: dict, chunk_path: Path) -> str:
 
 
 def rules_snapshot(book: Book) -> set[str]:
-    return {p.name for p in (book.vault / "rules").glob("*.md")}
+    return {p.name for p in (book.vault / "notes").glob("*.md")}
 
 
 def run_unit(book: Book, unit: dict, pages: dict[int, str], model: str, dry_run: bool) -> dict:

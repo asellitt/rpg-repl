@@ -16,6 +16,7 @@ model pulled (default qwen2.5:14b), and the python client:
 import argparse
 import re
 import sys
+import time
 from pathlib import Path
 
 try:
@@ -190,7 +191,7 @@ Obsidian vault of rules notes. The vault is the only source of truth —
 never answer from general knowledge.
 
 Vault layout:
-- rules/: one note per rule/concept. Frontmatter carries aliases, tags,
+- notes/: one note per rule or lore concept. Frontmatter carries aliases, tags,
   and sources — the book(s) and printed pages the note cites, as
   entries like "stormlight-handbook: 142-143".
 - _index/: one map-of-content note per book chapter, listing that
@@ -298,7 +299,7 @@ def build_name_map() -> dict[str, Path]:
     """Map lowercase note stems and aliases to note paths."""
     names: dict[str, Path] = {}
     alias_re = re.compile(r"^aliases:\s*\[(.*)\]", re.MULTILINE)
-    for note in list(VAULT.glob("rules/*.md")) + list(VAULT.glob("_sources/*.md")):
+    for note in list(VAULT.glob("notes/*.md")) + list(VAULT.glob("_sources/*.md")):
         names[note.stem.lower()] = note
         m = alias_re.search(note.read_text(encoding="utf-8"))
         if m:
@@ -395,6 +396,17 @@ def dispatch(name: str, arguments: dict) -> str:
     return f"Unknown tool: {name}"
 
 
+VERBOSE = False
+
+
+def _resp_stat(response, key):
+    try:
+        value = response[key]
+        return value if value is not None else "?"
+    except Exception:
+        return "?"
+
+
 def answer(question: str, model: str, messages: list | None = None, ctx: int = 8192) -> None:
     if messages is None:
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -402,6 +414,7 @@ def answer(question: str, model: str, messages: list | None = None, ctx: int = 8
     turn_start = len(messages)
     nudged = False
     for _ in range(MAX_TURNS):
+        call_started = time.monotonic()
         response = ollama.chat(
             model=model,
             messages=messages,
@@ -412,11 +425,24 @@ def answer(question: str, model: str, messages: list | None = None, ctx: int = 8
         message = response["message"]
         messages.append(message)
         tool_calls = message.get("tool_calls") or []
+        if VERBOSE:
+            print(
+                f"{DIM}  [model call: {time.monotonic() - call_started:.1f}s, "
+                f"prompt {_resp_stat(response, 'prompt_eval_count')} tok, "
+                f"output {_resp_stat(response, 'eval_count')} tok, "
+                f"{len(tool_calls)} tool call(s)]{RESET}",
+                file=sys.stderr,
+            )
+            interim = (message.get("content") or "").strip()
+            if interim and tool_calls:
+                print(f"{DIM}  [model says: {interim[:200]}]{RESET}", file=sys.stderr)
         if not tool_calls:
             content = message.get("content", "").strip()
             uncited = "[[" not in content and not re.search(r"\bp(?:\.|age)\s*\d", content)
             if uncited and not nudged:
                 nudged = True
+                print(f"{DIM}  [answer lacked citations; nudging for a retry]{RESET}",
+                      file=sys.stderr)
                 messages.append({"role": "user", "content": CITATION_NUDGE})
                 continue
             print(render_markdown(content))
@@ -430,6 +456,12 @@ def answer(question: str, model: str, messages: list | None = None, ctx: int = 8
             args = fn.get("arguments") or {}
             result = dispatch(fn["name"], args)
             print(f"{DIM}  [{fn['name']}({args})]{RESET}", file=sys.stderr)
+            if VERBOSE:
+                preview = "\n".join(f"    | {l}" for l in result.splitlines()[:6])
+                more = len(result.splitlines()) - 6
+                if more > 0:
+                    preview += f"\n    | ... (+{more} lines)"
+                print(f"{DIM}{preview}{RESET}", file=sys.stderr)
             messages.append({"role": "tool", "name": fn["name"], "content": result})
     print("Stopped: too many tool-call rounds without a final answer.")
 
@@ -443,7 +475,12 @@ def main() -> None:
                         help="context window tokens (lower = faster/less RAM)")
     parser.add_argument("--system", default="cosmere",
                         help="RPG system directory under systems/")
+    parser.add_argument("--verbose", action="store_true",
+                        help="show model timings/token counts, tool result previews")
     args = parser.parse_args()
+
+    global VERBOSE
+    VERBOSE = args.verbose
 
     if not load_system(args.system):
         sys.exit(f"No system '{args.system}' under {SYSTEMS} (available: {available_systems()})")

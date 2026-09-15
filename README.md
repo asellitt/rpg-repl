@@ -6,11 +6,15 @@ answers rules questions over them with a local LLM.
 ## Layout
 
 ```
-transcribe_pdf.py       PDF -> page-tagged plain text
-prompt_template.md      per-unit prompt for the headless note writer
+CLAUDE.md               pipeline operating knowledge (auto-loaded by Claude Code)
+transcribe_pdf.py       PDF -> page-tagged plain text (+ book.json via --title)
+map_chapters.py         drafts a book's chapters.json; scaffolds new systems
 run_chapters.py         drives `claude -p` over a book's units, resumable
+book_postflight.py      post-book report; --reconcile applies standard fixes
 validate_vault.py       vault checks (--fix unwraps broken wikilinks)
 ask.py                  local rules-lawyer agent (Ollama)
+prompt_*.md             the headless workers' task prompts
+conventions_template.md seed conventions for a new system's vault
 systems/                ONE Obsidian vault (the product); each RPG
                         system is a top-level directory inside it
 books/<system>/<book>/  per-book pipeline: book.json, chapters.json,
@@ -19,19 +23,17 @@ books/<system>/<book>/  per-book pipeline: book.json, chapters.json,
 
 ## Ingesting a book
 
-1. Extract:
-   `python3 transcribe_pdf.py BOOK.pdf books/<system>/<slug>/extracted.txt --layout --known-pair 5=1`
-2. Create `books/<system>/<slug>/book.json` (`title`, `page_offset`) and
-   `chapters.json` (unit map from the book's ToC).
-3. Run the units (resumable; state is per book):
-   ```bash
-   python3 run_chapters.py --system <system> --book <slug>
-   python3 run_chapters.py --status
-   python3 run_chapters.py 05 --model opus
-   ```
-4. `python3 validate_vault.py --system <system> --links`
+```bash
+python3 transcribe_pdf.py BOOK.pdf books/<system>/<slug>/extracted.txt \
+    --layout --known-pair 5=1 --title "Book Title"
+python3 map_chapters.py --system <system> --book <slug>   # then REVIEW the draft
+python3 run_chapters.py --system <system> --book <slug>   # resumable; --status
+python3 book_postflight.py --system <system> --book <slug> --reconcile
+```
 
-Flags default to the sole system/book when only one exists.
+Flags default to the sole system/book when only one exists (run_chapters).
+A new system name scaffolds its vault from conventions_template.md —
+review the tag taxonomy before running units.
 
 ## Asking rules questions (any machine)
 
