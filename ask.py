@@ -227,6 +227,17 @@ SYSTEM_PROMPT = SYSTEM_PROMPT_TEMPLATE.format(rpg="cosmere")
 RPG_NAME = "cosmere"
 
 
+def display_name(system: str) -> str:
+    meta = SYSTEMS / system / "_meta" / "system.json"
+    if meta.exists():
+        try:
+            import json
+            return json.loads(meta.read_text(encoding="utf-8")).get("display_name", system)
+        except Exception:
+            pass
+    return system
+
+
 def available_systems() -> list[str]:
     if not SYSTEMS.is_dir():
         return []
@@ -242,11 +253,12 @@ def load_system(name: str) -> bool:
     if not path.is_dir():
         return False
     VAULT = path
-    RPG_NAME = name
-    SYSTEM_PROMPT = SYSTEM_PROMPT_TEMPLATE.format(rpg=name)
+    RPG_NAME = display_name(name)
+    SYSTEM_PROMPT = SYSTEM_PROMPT_TEMPLATE.format(rpg=RPG_NAME)
     NAME_MAP = build_name_map()
     BOOK_NAMES.clear()
-    print(f"({name}: {len(NAME_MAP)} note names/aliases indexed)", file=sys.stderr)
+    print(f"({RPG_NAME} [{name}]: {len(NAME_MAP)} note names/aliases indexed)",
+          file=sys.stderr)
     return True
 
 TOOLS = [
@@ -508,13 +520,14 @@ def main() -> None:
             continue
         if question.startswith("/system"):
             name = question[7:].strip()
+            listing = ", ".join(f"{s} ({display_name(s)})" for s in available_systems())
             if not name:
-                print(f"Current system: {RPG_NAME}. Available: {', '.join(available_systems())}")
+                print(f"Current system: {RPG_NAME}. Available: {listing}")
             elif load_system(name):
                 messages = [{"role": "system", "content": SYSTEM_PROMPT}]
                 print("(context cleared)", file=sys.stderr)
             else:
-                print(f"No system '{name}'. Available: {', '.join(available_systems())}")
+                print(f"No system '{name}'. Available: {listing}")
             continue
         if question.startswith("/open "):
             open_note(question[6:].strip())

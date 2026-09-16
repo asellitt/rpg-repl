@@ -1,0 +1,8 @@
+services:
+  rpg-repl:
+    build: .
+    ports:
+      - "8420:8420"
+    volumes:
+      - ./systems:/app/systems:ro
+    restart: unless-stopped
