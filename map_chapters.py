@@ -43,6 +43,47 @@ def scaffold_system(system: str) -> None:
     print("  -> REVIEW _meta/conventions.md: tailor the tag taxonomy before running units.")
 
 
+def write_sources_stub(system: str, slug: str, config: dict, units: list[dict]) -> None:
+    """Write the book's _sources note skeleton (chapter table derived from
+    the drafted units) unless one already exists."""
+    source_note = SYSTEMS / system / "_sources" / f"{slug}.md"
+    if source_note.exists():
+        return
+    offset = config["page_offset"]
+    rows: list[list] = []
+    for unit in units:
+        chapter = unit["title"].split(" — ")[0]
+        if rows and rows[-1][0] == chapter:
+            rows[-1][2] = unit["pdf_end"] - offset
+        else:
+            rows.append([chapter, unit["pdf_start"] - offset, unit["pdf_end"] - offset])
+    table = "\n".join(f"| {c} | {a}–{b} |" for c, a, b in rows)
+    source_note.write_text(f"""---
+aliases: [{config['title']}]
+tags: [source]
+---
+
+# {config['title']}
+
+- Extracted text: `books/{system}/{slug}/extracted.txt`
+- Page offset: `pdf_page = printed_page + {offset}`
+
+## Chapters (printed pages)
+
+| Chapter | Pages |
+|---|---|
+{table}
+
+## Referenced but defined elsewhere
+
+Concepts this book uses without defining them; their vault links stay
+unresolved until a defining book is processed:
+
+(none recorded yet — the postflight pass maintains this list)
+""", encoding="utf-8")
+    print(f"Wrote source-note stub: {source_note.relative_to(ROOT)}")
+
+
 def build_outline(extracted: Path, page_offset: int) -> str:
     lines = ["Headings by pdf page (printed page = pdf - "
              f"{page_offset}); EMPTY marks pages with no extractable text:"]
@@ -136,6 +177,7 @@ def main() -> int:
             sys.exit(f"Draft invalid: {unit['id']} overlaps the previous unit")
         last_end = unit["pdf_end"]
 
+    write_sources_stub(args.system, args.book, config, units)
     print(f"\nDraft OK: {len(units)} units in {chapters_path}")
     print("REVIEW the draft (unit sizes, skips, MOC names), then run:")
     print(f"  python3 run_chapters.py --system {args.system} --book {args.book}")

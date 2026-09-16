@@ -23,6 +23,12 @@ fix that makes the vault honest:
    notes gets a small hub note named after the section, linking its
    pieces (frontmatter cites the section's printed pages; add the hub to
    the chapter's MOC).
+
+   If a dangling link names real content the unit workers missed, you
+   may write the missing note — but ONLY from the book's extracted text:
+   grep books/<system>/<book>/extracted.txt for the concept, read the
+   surrounding printed_page markers, and cite exactly those pages. Never
+   cite a page you haven't located the content on.
 2. Passing mention — a name the books never define and a reader wouldn't
    look up (a city mentioned once, a person name-dropped): unlink it to
    plain text in the referring note.

@@ -77,9 +77,13 @@ def main() -> int:
                 continue
             text = note.read_text(encoding="utf-8")
             fixed = unwrap_wikilinks(text)
+            if (note.parent.name == "notes"
+                    and fixed.startswith("---\n")
+                    and not re.search(r"^aliases:", fixed, re.MULTILINE)):
+                fixed = fixed.replace("---\n", "---\naliases: []\n", 1)
             if fixed != text:
                 note.write_text(fixed, encoding="utf-8")
-                print(f"fixed wrapped wikilink(s): {note.relative_to(ROOT)}")
+                print(f"fixed: {note.relative_to(ROOT)}")
 
     failures: list[str] = []
     link_targets: set[str] = set()

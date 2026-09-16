@@ -25,6 +25,13 @@ Unit state is `books/<system>/<slug>/work/state.json` — the driver skips
 `chapters.json`, or a book's `work/` while that book's run is live (the
 template is re-read per unit; state is rewritten wholesale per unit).
 
+Run ONE book at a time within a system: its workers all write the same
+vault, so concurrent runs race on shared notes and each driver's
+validator pass can fail on the other's half-written files. Books of
+different systems can run concurrently (disjoint vaults). Within a
+system, process books in dependency order (core handbook before
+bestiaries/setting guides).
+
 ## Pipeline per book
 
 1. `python3 transcribe_pdf.py BOOK.pdf books/<system>/<slug>/extracted.txt
@@ -62,6 +69,11 @@ template is re-read per unit; state is rewritten wholesale per unit).
   ("The World (Scadrial)").
 - Citations use printed pages only (pdf page = printed + book.json's
   page_offset).
+- Every book has a note in the system's `_sources/` (title H1, aliases,
+  page offset, full chapter table, "Referenced but defined elsewhere"
+  list). map_chapters.py writes the stub deterministically at draft
+  time; workers may enrich it, and the postflight reconcile verifies
+  its truthfulness before reasoning from it.
 
 ## Known failure modes and watch-items
 
