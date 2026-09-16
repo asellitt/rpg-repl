@@ -13,6 +13,7 @@ run_chapters.py         drives `claude -p` over a book's units, resumable
 book_postflight.py      post-book report; --reconcile applies standard fixes
 validate_vault.py       vault checks (--fix unwraps broken wikilinks)
 ask.py                  local rules-lawyer agent (Ollama)
+serve.py                self-hosted web viewer for the vaults
 prompt_*.md             the headless workers' task prompts
 conventions_template.md seed conventions for a new system's vault
 systems/                ONE Obsidian vault (the product); each RPG
@@ -34,6 +35,13 @@ python3 book_postflight.py --system <system> --book <slug> --reconcile
 Flags default to the sole system/book when only one exists (run_chapters).
 A new system name scaffolds its vault from conventions_template.md —
 review the tag taxonomy before running units.
+
+## Browsing the vaults in a browser
+
+`python3 serve.py` (needs `pip install markdown`) serves the live
+vault files at http://127.0.0.1:8420 — rendered markdown, resolved
+wikilinks and aliases, tag/source chips, backlinks, per-system search.
+`--host 0.0.0.0` makes it reachable on the LAN; `--port` changes the port.
 
 ## Asking rules questions (any machine)
 
