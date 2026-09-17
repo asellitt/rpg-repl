@@ -35,7 +35,7 @@ bestiaries/setting guides).
 ## Pipeline per book
 
 1. `python3 transcribe_pdf.py BOOK.pdf books/<system>/<slug>/extracted.txt
-   --layout --known-pair PDF=PRINTED --title "Book Title"`
+--layout --known-pair PDF=PRINTED --title "Book Title"`
    Review its furniture report (real content vs running heads) and the
    empty-page list (full-art pages are normal).
 2. `python3 map_chapters.py --system <system> --book <slug>` — scaffolds
@@ -90,7 +90,7 @@ bestiaries/setting guides).
 - Dangling links after a book are normal: forward refs to unprocessed
   chapters/books, book-section names that became several atomic notes
   (fix: hub note), or concepts defined in unowned books (document in the
-  _sources note's "Referenced but defined elsewhere").
+  \_sources note's "Referenced but defined elsewhere").
 - The `claude -p` workers run with --permission-mode acceptEdits from
   the repo root; their transcripts land in the book's logs/.
 
@@ -99,5 +99,6 @@ bestiaries/setting guides).
 Local rules lawyer over one system's notes: Ollama + tool calling
 (search/read/index), conversational, `/system` switches system,
 `/N` opens linked notes, Sources footer is harness-generated from
-frontmatter. Model default qwen2.5:14b; on slow hardware use
-llama3.1:8b. Its answers only cite what the vault holds.
+frontmatter. Model default qwen2.5:7b; `--model qwen2.5:14b` when
+quality matters more than speed. Its answers only cite what the
+vault holds.

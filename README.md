@@ -48,7 +48,7 @@ wikilinks and aliases, tag/source chips, backlinks, per-system search.
 Needs only `systems/` and `ask.py`.
 
 1. Install Ollama (https://ollama.com) and pull a tool-calling model:
-   `ollama pull qwen2.5:14b`
+   `ollama pull qwen2.5:7b`
 2. `pip install ollama`
 3. `python3 ask.py "how does raising the stakes work?"`
 

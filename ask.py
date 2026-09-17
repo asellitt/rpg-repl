@@ -9,11 +9,12 @@ Usage:
     python3 ask.py --model llama3.1:8b "what is a skill test?"
 
 Requires: Ollama running locally (https://ollama.com), a tool-calling
-model pulled (default qwen2.5:14b), and the python client:
+model pulled (default qwen2.5:7b), and the python client:
     pip install ollama
 """
 
 import argparse
+import math
 import re
 import sys
 import time
@@ -28,7 +29,6 @@ ROOT = Path(__file__).resolve().parent
 SYSTEMS = ROOT / "systems"
 VAULT = SYSTEMS / "cosmere"
 MAX_TURNS = 12
-MAX_SEARCH_LINES = 25
 
 USE_COLOR = sys.stdout.isatty() and sys.stdin.isatty()
 CYAN = "\033[36m" if USE_COLOR else ""
@@ -131,6 +131,19 @@ CITATION_NUDGE = (
     "(Note Name, p. X) for every rule, using pages from note frontmatter."
 )
 
+SEARCH_FIRST_NUDGE = (
+    "You answered without consulting the vault. Use search_vault and "
+    "read_note first, then answer only from what they return. If no "
+    "relevant notes exist, reply only that the vault doesn't cover this."
+)
+
+FABRICATED_NUDGE = (
+    "Your answer referenced notes that do not exist in the vault: {names}. "
+    "Drop every claim that came from them and keep only what the notes you "
+    "actually read support. If nothing remains, reply only that the vault "
+    "doesn't cover this."
+)
+
 
 BOOK_NAMES: dict[str, str] = {}
 
@@ -173,6 +186,16 @@ def print_sources(content: str) -> None:
         print(f"{DIM}Sources: {'; '.join(cites)}{RESET}")
 
 
+def fabricated_links(content: str) -> list[str]:
+    """Wikilinks in the answer that resolve to no vault note or alias."""
+    fakes: list[str] = []
+    for match in re.finditer(r"\[\[([^\]|#]+)", content.replace("\\|", "|")):
+        name = match.group(1).strip()
+        if NAME_MAP.get(name.lower()) is None and name not in fakes:
+            fakes.append(name)
+    return fakes
+
+
 def open_note(ref: str) -> None:
     """Print a note inline, by /N link number or by name/alias."""
     if ref.isdigit():
@@ -200,9 +223,8 @@ Vault layout:
 
 Workflow for every question:
 1. search_vault for the key terms (note names, aliases, and content are
-   indexed; multi-word queries match notes containing all the words, and
-   the result labels how each hit matched). Try synonyms if a search
-   misses.
+   indexed; results are notes ranked by relevance, each with one matching
+   line as a preview). Try synonyms if a search misses.
 2. read_note the most relevant hits in full.
 3. Follow [[wikilinks]] to related notes when the answer spans concepts.
 
@@ -217,8 +239,9 @@ Answering rules:
   numbered references they can open.
 - End every answer with a "Related:" line listing the wikilinks of the
   notes you used or that the reader would sensibly open next.
-- If the vault doesn't cover the question, say exactly that — never
-  guess or fill gaps from outside knowledge.
+- If the vault doesn't cover the question, reply exactly "The vault
+  doesn't cover this." and nothing else — never guess or fill gaps from
+  outside knowledge.
 - Distinguish rules-as-written (quoted) from your interpretation, and
   label the interpretation as such.
 """
@@ -256,6 +279,7 @@ def load_system(name: str) -> bool:
     RPG_NAME = display_name(name)
     SYSTEM_PROMPT = SYSTEM_PROMPT_TEMPLATE.format(rpg=RPG_NAME)
     NAME_MAP = build_name_map()
+    _INDEX_CACHE.pop(path, None)
     BOOK_NAMES.clear()
     print(f"({RPG_NAME} [{name}]: {len(NAME_MAP)} note names/aliases indexed)",
           file=sys.stderr)
@@ -328,55 +352,114 @@ STOPWORDS = {
 }
 
 
-def search_vault(query: str) -> str:
-    query_lower = query.lower().strip()
-    tokens = [
-        t for t in re.findall(r"[a-z0-9']+", query_lower) if t not in STOPWORDS
-    ] or [query_lower]
-    hits: list[str] = []
+WORD_RE = re.compile(r"[a-z0-9']+")
 
-    # Tier 1: note names/aliases containing the phrase or all terms.
-    name_matches: list[Path] = []
-    for name, path in sorted(NAME_MAP.items(), key=lambda kv: str(kv[1])):
-        if (query_lower in name or all(t in name for t in tokens)) and path not in name_matches:
-            name_matches.append(path)
-            hits.append(f"NOTE MATCH: {path.relative_to(VAULT)}")
+_INDEX_CACHE: dict[Path, dict] = {}
 
-    # Tier 2: lines containing the phrase or all terms.
-    truncated = False
-    note_texts: dict[Path, str] = {}
+
+def _token_matches(word: str, token: str) -> bool:
+    """Prefix match, with a naive plural fold ('tests' finds 'test')."""
+    if word.startswith(token):
+        return True
+    return token.endswith("s") and len(token) > 3 and word.startswith(token[:-1])
+
+
+def _vault_index() -> dict:
+    """Per-note word counts, lines, and name/alias words, built once per vault."""
+    index = _INDEX_CACHE.get(VAULT)
+    if index is not None:
+        return index
+    notes: dict[Path, tuple[dict[str, int], list[str]]] = {}
     for note in sorted(VAULT.rglob("*.md")):
         if note.parent.name == "_meta":
             continue
         text = note.read_text(encoding="utf-8")
-        note_texts[note] = text.lower()
-        for line in text.splitlines():
-            line_lower = line.lower()
-            if query_lower in line_lower or all(t in line_lower for t in tokens):
-                if len(hits) < MAX_SEARCH_LINES:
-                    hits.append(f"{note.relative_to(VAULT)}: {line.strip()}")
-                else:
-                    truncated = True
-    if truncated:
-        hits.append("... (more hits truncated; refine the query)")
+        counts: dict[str, int] = {}
+        for word in WORD_RE.findall(text.lower()):
+            counts[word] = counts.get(word, 0) + 1
+        notes[note] = (counts, text.splitlines())
+    stem_words: dict[Path, set[str]] = {}
+    alias_words: dict[Path, set[str]] = {}
+    for name, path in NAME_MAP.items():
+        words = set(WORD_RE.findall(name))
+        target = stem_words if name == path.stem.lower() else alias_words
+        target.setdefault(path, set()).update(words)
+    index = {"notes": notes, "stem": stem_words, "alias": alias_words}
+    _INDEX_CACHE[VAULT] = index
+    return index
 
-    # Tier 3: all terms somewhere in one note (spread across lines).
-    if not hits:
-        spread = [n for n, t in note_texts.items() if all(tok in t for tok in tokens)]
-        hits.extend(f"ALL TERMS IN NOTE: {n.relative_to(VAULT)}" for n in spread[:10])
 
-    # Tier 4: per-term name/alias matches, so one good term still leads
-    # somewhere even when the other terms don't appear verbatim.
-    if not hits:
-        for token in tokens:
-            matches = sorted(
-                {str(p.relative_to(VAULT)) for name, p in NAME_MAP.items() if token in name}
-            )[:5]
-            if matches:
-                hits.append(f"NOTES MATCHING '{token}': " + ", ".join(matches))
+def search_vault(query: str) -> str:
+    query_lower = query.lower().strip()
+    tokens = [
+        t for t in WORD_RE.findall(query_lower) if t not in STOPWORDS
+    ] or [query_lower]
+    index = _vault_index()
+    notes = index["notes"]
+    n_docs = len(notes) or 1
 
-    if not hits:
+    # Rarer terms count for more: 'iron' should outweigh 'power'.
+    idf = {}
+    for t in tokens:
+        df = sum(
+            1 for counts, _ in notes.values()
+            if any(_token_matches(w, t) for w in counts)
+        )
+        idf[t] = math.log(1 + n_docs / (1 + df))
+
+    scored: list[tuple[float, Path, list[str]]] = []
+    for note, (counts, lines) in notes.items():
+        stem = index["stem"].get(note, set())
+        alias = index["alias"].get(note, set())
+        score = 0.0
+        matched = 0
+        for t in tokens:
+            hit = False
+            if any(_token_matches(w, t) for w in stem):
+                score += 4.0 * idf[t]
+                hit = True
+            elif any(_token_matches(w, t) for w in alias):
+                score += 2.0 * idf[t]
+                hit = True
+            tf = sum(c for w, c in counts.items() if _token_matches(w, t))
+            if tf:
+                score += idf[t] * (1.0 + math.log(tf))
+                hit = True
+            if hit:
+                matched += 1
+        if not matched:
+            continue
+        if query_lower in note.stem.lower():
+            score += 8.0
+        # Notes matching more of the query beat strong single-term hits.
+        score *= 0.3 + 0.7 * matched / len(tokens)
+        scored.append((score, note, lines))
+
+    if not scored:
         return f"No matches for '{query}'. Try a synonym or a broader term."
+    scored.sort(key=lambda entry: (-entry[0], str(entry[1])))
+
+    def best_line(lines: list[str]) -> str:
+        best, best_key = "", (0, 0)
+        for line in lines:
+            if re.match(r"^(---|aliases:|tags:|sources:)", line):
+                continue
+            words = WORD_RE.findall(line.lower())
+            distinct = sum(
+                1 for t in tokens if any(_token_matches(w, t) for w in words)
+            )
+            key = (distinct, -len(line))
+            if distinct and key > best_key:
+                best_key, best = key, line.strip()
+        return best
+
+    hits = []
+    for _, note, lines in scored[:10]:
+        line = best_line(lines)
+        hits.append(
+            f"NOTE MATCH: {note.relative_to(VAULT)}"
+            + (f" | {line[:160]}" if line else "")
+        )
     return "\n".join(hits)
 
 
@@ -425,13 +508,16 @@ def answer(question: str, model: str, messages: list | None = None, ctx: int = 8
     messages.append({"role": "user", "content": question})
     turn_start = len(messages)
     nudged = False
+    search_nudged = False
+    fake_nudged = False
+    searched = False
     for _ in range(MAX_TURNS):
         call_started = time.monotonic()
         response = ollama.chat(
             model=model,
             messages=messages,
             tools=TOOLS,
-            options={"num_ctx": ctx},
+            options={"num_ctx": ctx, "temperature": 0},
             keep_alive="30m",
         )
         message = response["message"]
@@ -450,8 +536,37 @@ def answer(question: str, model: str, messages: list | None = None, ctx: int = 8
                 print(f"{DIM}  [model says: {interim[:200]}]{RESET}", file=sys.stderr)
         if not tool_calls:
             content = message.get("content", "").strip()
+            no_coverage = re.fullmatch(
+                r"the vault does(?:n't| not) cover th\w+\.?", content.strip(),
+                re.IGNORECASE) is not None
+            if not searched and not no_coverage:
+                if search_nudged:
+                    print("Answer withheld: the model wouldn't consult the vault. "
+                          "Try rephrasing the question.")
+                    del messages[turn_start:]
+                    return
+                search_nudged = True
+                print(f"{DIM}  [answered without searching; nudging for a retry]{RESET}",
+                      file=sys.stderr)
+                messages.append({"role": "user", "content": SEARCH_FIRST_NUDGE})
+                continue
+            fakes = fabricated_links(content)
+            if fakes and not no_coverage:
+                if fake_nudged:
+                    print("Answer withheld: it cited notes that don't exist "
+                          f"({', '.join(fakes)}). Try rephrasing the question.")
+                    del messages[turn_start:]
+                    return
+                fake_nudged = True
+                print(f"{DIM}  [answer cited nonexistent notes: "
+                      f"{', '.join(fakes)}; nudging for a retry]{RESET}",
+                      file=sys.stderr)
+                messages.append(
+                    {"role": "user",
+                     "content": FABRICATED_NUDGE.format(names=", ".join(fakes))})
+                continue
             uncited = "[[" not in content and not re.search(r"\bp(?:\.|age)\s*\d", content)
-            if uncited and not nudged:
+            if uncited and not nudged and not no_coverage:
                 nudged = True
                 print(f"{DIM}  [answer lacked citations; nudging for a retry]{RESET}",
                       file=sys.stderr)
@@ -463,6 +578,7 @@ def answer(question: str, model: str, messages: list | None = None, ctx: int = 8
             # dumps are the bulk of the context and follow-ups re-search.
             del messages[turn_start:-1]
             return
+        searched = True
         for call in tool_calls:
             fn = call["function"]
             args = fn.get("arguments") or {}
@@ -482,7 +598,7 @@ def main() -> None:
     global NAME_MAP, VAULT, RPG_NAME, SYSTEM_PROMPT
     parser = argparse.ArgumentParser()
     parser.add_argument("question", nargs="*", help="the rules question (omit for a REPL)")
-    parser.add_argument("--model", default="qwen2.5:14b")
+    parser.add_argument("--model", default="qwen2.5:7b")
     parser.add_argument("--ctx", type=int, default=8192,
                         help="context window tokens (lower = faster/less RAM)")
     parser.add_argument("--system", default="cosmere",
