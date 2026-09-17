@@ -1,0 +1,10 @@
+services:
+  rpg-repl:
+    build:
+      context: ..
+      dockerfile: viewer/Dockerfile
+    ports:
+      - "8420:8420"
+    volumes:
+      - ../systems:/app/systems:ro
+    restart: unless-stopped

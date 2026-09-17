@@ -65,6 +65,7 @@ docker buildx build \
   --label "org.opencontainers.image.version=${NEXT}" \
   --tag "${IMAGE}:${NEXT}" \
   --tag "${IMAGE}:latest" \
+  --file viewer/Dockerfile \
   --push \
   .
 

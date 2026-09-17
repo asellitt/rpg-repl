@@ -7,9 +7,9 @@ conventions.md seeded from conventions_template.md — review its tag
 taxonomy before running units).
 
 Usage:
-    python3 plan_book.py --system cosmere --book mistborn-handbook
-    python3 plan_book.py --book <slug> --outline-only   # no LLM step
-    python3 plan_book.py --book <slug> --model opus
+    python3 pipeline/plan_book.py --system cosmere --book mistborn-handbook
+    python3 pipeline/plan_book.py --book <slug> --outline-only   # no LLM step
+    python3 pipeline/plan_book.py --book <slug> --model opus
 
 Requires books/<system>/<slug>/{extracted.txt, book.json} (transcribe_pdf.py
 with --title produces both). The draft chapters.json is written by a
@@ -23,11 +23,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 SYSTEMS = ROOT / "systems"
 BOOKS = ROOT / "books"
-PROMPT = ROOT / "prompt_plan_book.md"
-TEMPLATE = ROOT / "conventions_template.md"
+PROMPT = ROOT / "pipeline" / "prompts" / "plan_book.md"
+TEMPLATE = ROOT / "pipeline" / "conventions_template.md"
 
 
 def scaffold_system(system: str) -> None:
@@ -185,7 +185,7 @@ def main() -> int:
     write_sources_stub(args.system, args.book, config, units)
     print(f"\nDraft OK: {len(units)} units in {chapters_path}")
     print("REVIEW the draft (unit sizes, skips, MOC names), then run:")
-    print(f"  python3 process_book.py --system {args.system} --book {args.book}")
+    print(f"  python3 pipeline/process_book.py --system {args.system} --book {args.book}")
     return 0
 
 

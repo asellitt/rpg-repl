@@ -9,9 +9,9 @@ Reports (writes books/<system>/<book>/work/postflight_report.md):
   - unit state summary
 
 Usage:
-    python3 validate_book.py --system cosmere --book mistborn-handbook
-    python3 validate_book.py --book <slug> --reconcile   # + headless fixes
-    python3 validate_book.py --book <slug> --reconcile --model opus
+    python3 pipeline/validate_book.py --system cosmere --book mistborn-handbook
+    python3 pipeline/validate_book.py --book <slug> --reconcile   # + headless fixes
+    python3 pipeline/validate_book.py --book <slug> --reconcile --model opus
 
 Report-only is read-only (safe any time). --reconcile launches a headless
 claude worker that applies the standard fixes (hub notes, aliases,
@@ -26,10 +26,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 SYSTEMS = ROOT / "systems"
 BOOKS = ROOT / "books"
-PROMPT = ROOT / "prompt_validate_book.md"
+PROMPT = ROOT / "pipeline" / "prompts" / "validate_book.md"
 WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)")
 
 
@@ -99,7 +99,7 @@ def main() -> int:
     pending = [u["id"] for u in chapters if state.get(u["id"], {}).get("status") != "done"]
 
     validator = subprocess.run(
-        [sys.executable, str(ROOT / "validate_system.py"), "--system", args.system],
+        [sys.executable, str(ROOT / "pipeline" / "validate_system.py"), "--system", args.system],
         cwd=ROOT, capture_output=True, text=True,
     )
     facts = gather(system_dir, args.book)
@@ -155,7 +155,7 @@ def main() -> int:
         )
     print(f"Reconcile worker exit {result.returncode}")
     final = subprocess.run(
-        [sys.executable, str(ROOT / "validate_system.py"), "--fix", "--system", args.system],
+        [sys.executable, str(ROOT / "pipeline" / "validate_system.py"), "--fix", "--system", args.system],
         cwd=ROOT,
     )
     return result.returncode or final.returncode

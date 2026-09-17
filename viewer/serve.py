@@ -27,7 +27,7 @@ try:
 except ImportError:
     sys.exit("The markdown package is not installed. Run: pip install markdown")
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 SYSTEMS = ROOT / "systems"
 CACHE_TTL = 30  # seconds before the link/alias index is rebuilt
 WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:\|([^\]]+))?\]\]")

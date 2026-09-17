@@ -21,7 +21,7 @@ books/<system>/<slug>/   per-book pipeline: book.json {title, page_offset},
 ```
 
 Unit state is `books/<system>/<slug>/work/state.json` — the driver skips
-`done` units, so runs are resumable. Never edit `prompt_process_book.md`,
+`done` units, so runs are resumable. Never edit `pipeline/prompts/process_book.md`,
 `chapters.json`, or a book's `work/` while that book's run is live (the
 template is re-read per unit; state is rewritten wholesale per unit).
 
@@ -34,19 +34,19 @@ bestiaries/setting guides).
 
 ## Pipeline per book
 
-1. `python3 transcribe_pdf.py BOOK.pdf books/<system>/<slug>/extracted.txt
+1. `python3 pipeline/transcribe_pdf.py BOOK.pdf books/<system>/<slug>/extracted.txt
    --layout --known-pair PDF=PRINTED --title "Book Title"`
    Review its furniture report (real content vs running heads) and the
    empty-page list (full-art pages are normal).
-2. `python3 plan_book.py --system <system> --book <slug>` — scaffolds
+2. `python3 pipeline/plan_book.py --system <system> --book <slug>` — scaffolds
    a new system's directory if needed, builds the heading outline, drafts
    chapters.json via a headless worker. REVIEW the draft (unit sizes,
    skips, MOC names) before running units.
-3. `python3 process_book.py --system <system> --book <slug>` — headless
+3. `python3 pipeline/process_book.py --system <system> --book <slug>` — headless
    note-writing, one `claude -p` worker per unit (~5-20 min each,
    default --model sonnet). Validator runs per unit and halts the run on
    hard failures; fix and re-run (completed units are skipped).
-4. `python3 validate_book.py --system <system> --book <slug>` — the
+4. `python3 pipeline/validate_book.py --system <system> --book <slug>` — the
    post-book report (dangling links, MOC coverage, merge stats); add
    `--reconcile` to have a headless worker apply the standard fixes.
 5. Ship: zip `systems/` + `ask.py` to the REPL machine.
@@ -71,13 +71,13 @@ bestiaries/setting guides).
   page_offset).
 - Every book has a note in the system's `_sources/` (title H1, aliases,
   page offset, full chapter table, "Referenced but defined elsewhere"
-  list). plan_book.py writes the stub deterministically at draft
+  list). pipeline/plan_book.py writes the stub deterministically at draft
   time; workers may enrich it, and the postflight reconcile verifies
   its truthfulness before reasoning from it.
 
 ## Known failure modes and watch-items
 
-- Workers sometimes line-wrap wikilinks; `validate_system.py --fix`
+- Workers sometimes line-wrap wikilinks; `pipeline/validate_system.py --fix`
   repairs this mechanically (the driver runs it per unit).
 - `[[Name\|display]]` (escaped pipe in tables) is valid Obsidian; all
   tools normalize it before parsing.

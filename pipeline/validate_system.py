@@ -4,10 +4,10 @@ Validate a system's notes: frontmatter completeness, H1/filename agreement,
 and wikilink resolution.
 
 Usage:
-    python3 validate_system.py                    # validate the default system
-    python3 validate_system.py --system cosmere   # validate one system
-    python3 validate_system.py --links            # also print every unresolved link
-    python3 validate_system.py --fix              # first unwrap line-wrapped wikilinks
+    python3 pipeline/validate_system.py                    # validate the default system
+    python3 pipeline/validate_system.py --system cosmere   # validate one system
+    python3 pipeline/validate_system.py --links            # also print every unresolved link
+    python3 pipeline/validate_system.py --fix              # first unwrap line-wrapped wikilinks
 
 Exit code 1 on hard failures (bad frontmatter, H1 mismatch), 0 otherwise.
 Unresolved wikilinks are informational -- forward links are expected
@@ -19,7 +19,7 @@ import re
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 SYSTEMS = ROOT / "systems"
 SYSTEM_DIR = SYSTEMS / "cosmere"
 REQUIRED_KEYS = ("aliases", "tags", "sources")

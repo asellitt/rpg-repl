@@ -11,13 +11,13 @@ Each book lives at books/<system>/<book-slug>/ containing:
     logs/           headless worker transcripts
 
 Usage:
-    python3 process_book.py                          # all pending units
-    python3 process_book.py 01 05b                   # unit ids/prefixes
-    python3 process_book.py --system cosmere --book stormlight-handbook 02
-    python3 process_book.py --model opus 04
-    python3 process_book.py --dry-run 01
-    python3 process_book.py --force 01
-    python3 process_book.py --status
+    python3 pipeline/process_book.py                          # all pending units
+    python3 pipeline/process_book.py 01 05b                   # unit ids/prefixes
+    python3 pipeline/process_book.py --system cosmere --book stormlight-handbook 02
+    python3 pipeline/process_book.py --model opus 04
+    python3 pipeline/process_book.py --dry-run 01
+    python3 pipeline/process_book.py --force 01
+    python3 pipeline/process_book.py --status
 
 --system defaults to the sole directory under systems/ (else cosmere);
 --book defaults to the sole book under books/<system>/ and is required
@@ -34,10 +34,10 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 SYSTEMS = ROOT / "systems"
 BOOKS = ROOT / "books"
-PROMPT_TEMPLATE = ROOT / "prompt_process_book.md"
+PROMPT_TEMPLATE = ROOT / "pipeline" / "prompts" / "process_book.md"
 
 
 def sole_or_default(parent: Path, default: str | None, kind: str) -> str:
@@ -159,7 +159,7 @@ def run_unit(book: Book, unit: dict, pages: dict[int, str], model: str, dry_run:
         return {"status": "failed", "exit": result.returncode}
 
     validator = subprocess.run(
-        [sys.executable, str(ROOT / "validate_system.py"), "--fix", "--system", book.system],
+        [sys.executable, str(ROOT / "pipeline" / "validate_system.py"), "--fix", "--system", book.system],
         cwd=ROOT,
     )
     if validator.returncode != 0:

@@ -1,7 +1,8 @@
+__pycache__/
+.DS_Store
 .venv
+*.pyc
+books/
 input/
 output/
-
-books/
 systems/
-__pycache__/
