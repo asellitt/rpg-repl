@@ -6,14 +6,17 @@ tool calling.
 Usage:
     python3 ask.py "how does raising the stakes work?"
     python3 ask.py                     # interactive REPL
+    python3 ask.py --fast "what is a skill test?"   # small model, quicker
     python3 ask.py --model llama3.1:8b "what is a skill test?"
 
 Requires: Ollama running locally (https://ollama.com), a tool-calling
-model pulled (default qwen2.5:7b), and the python client:
+model pulled (default qwen2.5:14b; --fast uses qwen2.5:7b), and the
+python client:
     pip install ollama
 """
 
 import argparse
+import difflib
 import math
 import re
 import sys
@@ -29,6 +32,8 @@ ROOT = Path(__file__).resolve().parent
 SYSTEMS = ROOT / "systems"
 SYSTEM_DIR = SYSTEMS / "cosmere"
 MAX_TURNS = 12
+FAST_MODEL = "qwen2.5:7b"
+SMART_MODEL = "qwen2.5:14b"
 
 USE_COLOR = sys.stdout.isatty() and sys.stdin.isatty()
 CYAN = "\033[36m" if USE_COLOR else ""
@@ -131,9 +136,10 @@ CITATION_NUDGE = (
     "(Note Name, p. X) for every rule, using pages from note frontmatter."
 )
 
-SEARCH_FIRST_NUDGE = (
-    "You answered without consulting the system's notes. Use search_system "
-    "and read_note first, then answer only from what they return. If no "
+READ_FIRST_NUDGE = (
+    "You answered without reading any note in full. Search previews are "
+    "not evidence: use search_system to find candidates, then read_note "
+    "the relevant hits, and answer only from what the notes say. If no "
     "relevant notes exist, reply only that the system doesn't cover this."
 )
 
@@ -225,8 +231,11 @@ Workflow for every question:
 1. search_system for the key terms (note names, aliases, and content are
    indexed; results are notes ranked by relevance, each with one matching
    line as a preview). Try synonyms if a search misses.
-2. read_note the most relevant hits in full.
-3. Follow [[wikilinks]] to related notes when the answer spans concepts.
+2. read_note the most relevant hits in full — search result previews are
+   never enough to answer from.
+3. Follow [[wikilinks]] to related notes when the answer spans concepts,
+   and read the linked note whenever a note you read defers the actual
+   answer to it.
 
 Answering rules:
 - Quote mechanics exactly — numbers, dice, DCs, costs. Never approximate.
@@ -242,6 +251,10 @@ Answering rules:
 - If the notes don't cover the question, reply exactly "The system
   doesn't cover this." and nothing else — never guess or fill gaps from
   outside knowledge.
+- If the notes you read never mention the thing being asked about, that
+  is also not covered — reply exactly "The system doesn't cover this."
+  rather than answering about a different topic the search happened to
+  match.
 - Distinguish rules-as-written (quoted) from your interpretation, and
   label the interpretation as such.
 """
@@ -335,7 +348,8 @@ def build_name_map() -> dict[str, Path]:
     """Map lowercase note stems and aliases to note paths."""
     names: dict[str, Path] = {}
     alias_re = re.compile(r"^aliases:\s*\[(.*)\]", re.MULTILINE)
-    for note in list(SYSTEM_DIR.glob("notes/*.md")) + list(SYSTEM_DIR.glob("_sources/*.md")):
+    for note in (list(SYSTEM_DIR.glob("notes/*.md")) + list(SYSTEM_DIR.glob("_index/*.md"))
+                 + list(SYSTEM_DIR.glob("_sources/*.md"))):
         names[note.stem.lower()] = note
         m = alias_re.search(note.read_text(encoding="utf-8"))
         if m:
@@ -384,7 +398,13 @@ def _system_index() -> dict:
         words = set(WORD_RE.findall(name))
         target = stem_words if name == path.stem.lower() else alias_words
         target.setdefault(path, set()).update(words)
-    index = {"notes": notes, "stem": stem_words, "alias": alias_words}
+    vocab: set[str] = set()
+    for counts, _ in notes.values():
+        vocab.update(counts)
+    for words in list(stem_words.values()) + list(alias_words.values()):
+        vocab.update(words)
+    index = {"notes": notes, "stem": stem_words, "alias": alias_words,
+             "vocab": sorted(vocab)}
     _INDEX_CACHE[SYSTEM_DIR] = index
     return index
 
@@ -397,6 +417,18 @@ def search_system(query: str) -> str:
     index = _system_index()
     notes = index["notes"]
     n_docs = len(notes) or 1
+
+    # A word no note contains (a typo, a British spelling) would silently
+    # drop out and leave the query's generic words to rank alone — correct
+    # it to the closest indexed word and say so in the results.
+    corrections: list[str] = []
+    for i, t in enumerate(tokens):
+        if any(_token_matches(w, t) for w in index["vocab"]):
+            continue
+        close = difflib.get_close_matches(t, index["vocab"], n=1, cutoff=0.8)
+        if close:
+            corrections.append(f"(no hits for '{t}'; searching '{close[0]}' instead)")
+            tokens[i] = close[0]
 
     # Rarer terms count for more: 'iron' should outweigh 'power'.
     idf = {}
@@ -436,7 +468,8 @@ def search_system(query: str) -> str:
         scored.append((score, note, lines))
 
     if not scored:
-        return f"No matches for '{query}'. Try a synonym or a broader term."
+        return "\n".join(corrections
+                         + [f"No matches for '{query}'. Try a synonym or a broader term."])
     scored.sort(key=lambda entry: (-entry[0], str(entry[1])))
 
     def best_line(lines: list[str]) -> str:
@@ -453,7 +486,7 @@ def search_system(query: str) -> str:
                 best_key, best = key, line.strip()
         return best
 
-    hits = []
+    hits = list(corrections)
     for _, note, lines in scored[:10]:
         line = best_line(lines)
         hits.append(
@@ -508,9 +541,9 @@ def answer(question: str, model: str, messages: list | None = None, ctx: int = 8
     messages.append({"role": "user", "content": question})
     turn_start = len(messages)
     nudged = False
-    search_nudged = False
+    read_nudged = False
     fake_nudged = False
-    searched = False
+    read_any = False
     for _ in range(MAX_TURNS):
         call_started = time.monotonic()
         response = ollama.chat(
@@ -539,16 +572,16 @@ def answer(question: str, model: str, messages: list | None = None, ctx: int = 8
             no_coverage = re.fullmatch(
                 r"the system does(?:n't| not) cover th\w+\.?", content.strip(),
                 re.IGNORECASE) is not None
-            if not searched and not no_coverage:
-                if search_nudged:
-                    print("Answer withheld: the model wouldn't consult the notes. "
+            if not read_any and not no_coverage:
+                if read_nudged:
+                    print("Answer withheld: the model wouldn't read any note in full. "
                           "Try rephrasing the question.")
                     del messages[turn_start:]
                     return
-                search_nudged = True
-                print(f"{DIM}  [answered without searching; nudging for a retry]{RESET}",
+                read_nudged = True
+                print(f"{DIM}  [answered without reading a note; nudging for a retry]{RESET}",
                       file=sys.stderr)
-                messages.append({"role": "user", "content": SEARCH_FIRST_NUDGE})
+                messages.append({"role": "user", "content": READ_FIRST_NUDGE})
                 continue
             fakes = fabricated_links(content)
             if fakes and not no_coverage:
@@ -578,9 +611,10 @@ def answer(question: str, model: str, messages: list | None = None, ctx: int = 8
             # dumps are the bulk of the context and follow-ups re-search.
             del messages[turn_start:-1]
             return
-        searched = True
         for call in tool_calls:
             fn = call["function"]
+            if fn["name"] == "read_note":
+                read_any = True
             args = fn.get("arguments") or {}
             result = dispatch(fn["name"], args)
             print(f"{DIM}  [{fn['name']}({args})]{RESET}", file=sys.stderr)
@@ -598,7 +632,12 @@ def main() -> None:
     global NAME_MAP, SYSTEM_DIR, RPG_NAME, SYSTEM_PROMPT
     parser = argparse.ArgumentParser()
     parser.add_argument("question", nargs="*", help="the rules question (omit for a REPL)")
-    parser.add_argument("--model", default="qwen2.5:7b")
+    model_group = parser.add_mutually_exclusive_group()
+    model_group.add_argument("--model", default=SMART_MODEL)
+    model_group.add_argument("--dumb", "--fast", dest="fast", action="store_true",
+                             help=f"use the small model ({FAST_MODEL})")
+    model_group.add_argument("--slow", "--smart", dest="smart", action="store_true",
+                             help=f"use the big model ({SMART_MODEL}) — the default")
     parser.add_argument("--ctx", type=int, default=8192,
                         help="context window tokens (lower = faster/less RAM)")
     parser.add_argument("--system", default="cosmere",
@@ -606,6 +645,10 @@ def main() -> None:
     parser.add_argument("--verbose", action="store_true",
                         help="show model timings/token counts, tool result previews")
     args = parser.parse_args()
+    if args.smart:
+        args.model = SMART_MODEL
+    elif args.fast:
+        args.model = FAST_MODEL
 
     global VERBOSE
     VERBOSE = args.verbose
