@@ -8,6 +8,7 @@ answers rules questions over them with a local LLM.
 ```
 CLAUDE.md                 pipeline operating knowledge (auto-loaded by Claude Code)
 ask.py                    local rules-lawyer agent (Ollama); ships with systems/
+rules                     one-command REPL: starts a tuned Ollama if needed, runs ask.py
 systems/                  ONE Obsidian vault (the product); each RPG
                           system is a top-level directory inside it
 books/<system>/<book>/    per-book pipeline: book.json, chapters.json,
@@ -50,16 +51,25 @@ wikilinks and aliases, tag/source chips, backlinks, per-system search.
 
 ## Asking rules questions (any machine)
 
-Needs only `systems/` and `ask.py`.
+Needs only `systems/`, `ask.py`, and `ask`.
 
 1. Install Ollama (https://ollama.com) and pull a tool-calling model:
-   `ollama pull qwen2.5:7b`
+   `ollama pull qwen2.5:14b` (and `qwen2.5:7b` if you want `--fast`)
 2. `pip install ollama`
-3. `python3 ask.py "how does raising the stakes work?"`
+3. `./ask "how does raising the stakes work?"`
+
+`./ask` starts an Ollama server with the fast settings
+(`OLLAMA_FLASH_ATTENTION=1 OLLAMA_KV_CACHE_TYPE=q8_0`) when none is
+running, stops it again when you quit, and passes every argument to
+ask.py — running `python3 ask.py` directly against your own server
+works the same.
 
 Bare `python3 ask.py` gives a conversational REPL: cyan questions,
 numbered note links (`/2` opens one inline, `/open NAME` by name),
 `/system NAME` switches RPG system and clears context, `/clear` resets,
-`--system` picks the starting system, `--model`/`--ctx` tune the model.
+`--system` picks the starting system, `--fast`/`--dumb` swaps to the
+small model, `--slow`/`--smart` the big one (the default), and
+`--model`/`--ctx` tune it by hand.
 Every answer ends with a Sources footer citing book and printed pages
 from note frontmatter.
+s

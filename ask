@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# One-command REPL: starts a tuned Ollama server if none is running,
+# hands every argument to ask.py, and stops the server it started.
+set -euo pipefail
+cd "$(dirname "$0")"
+
+PYTHON="${PYTHON:-python3}"
+
+if ! curl -s http://127.0.0.1:11434/api/version >/dev/null; then
+  OLLAMA_FLASH_ATTENTION=1 OLLAMA_KV_CACHE_TYPE=q8_0 ollama serve >/tmp/ollama-serve.log 2>&1 &
+  trap 'kill %1 2>/dev/null' EXIT
+  until curl -s http://127.0.0.1:11434/api/version >/dev/null; do sleep 0.3; done
+fi
+
+"$PYTHON" ask.py "$@"

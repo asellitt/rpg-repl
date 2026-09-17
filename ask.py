@@ -20,6 +20,7 @@ import difflib
 import math
 import re
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -150,6 +151,13 @@ FABRICATED_NUDGE = (
     "doesn't cover this."
 )
 
+CITED_UNREAD_NUDGE = (
+    "Your answer cites pages from notes you have not read: {names}. "
+    "read_note every note you cite, or drop those citations and the claims "
+    "resting on them. If nothing remains, reply only that the system "
+    "doesn't cover this."
+)
+
 
 BOOK_NAMES: dict[str, str] = {}
 
@@ -202,6 +210,20 @@ def fabricated_links(content: str) -> list[str]:
     return fakes
 
 
+CITE_RE = re.compile(r"\(([^()]*(?:\([^()]*\)[^()]*)*),\s*p(?:\.|age)\s*\d")
+
+
+def cited_unread(content: str, read_paths: set[Path]) -> list[str]:
+    """Notes the answer page-cites inline without ever having read them."""
+    unread: list[str] = []
+    for match in CITE_RE.finditer(content.replace("\\|", "|")):
+        name = match.group(1).strip().strip("[]").strip()
+        path = NAME_MAP.get(name.lower())
+        if path is not None and path not in read_paths and path.stem not in unread:
+            unread.append(path.stem)
+    return unread
+
+
 def open_note(ref: str) -> None:
     """Print a note inline, by /N link number or by name/alias."""
     if ref.isdigit():
@@ -215,48 +237,31 @@ def open_note(ref: str) -> None:
     print(render_markdown(text))
 
 SYSTEM_PROMPT_TEMPLATE = """\
-You are a rules expert for the {rpg} tabletop RPG, answering from an
-Obsidian collection of rules notes. Those notes are the only source of
-truth — never answer from general knowledge.
+You are a rules expert for the {rpg} tabletop RPG. The system's rules
+notes are the only source of truth — never answer from general knowledge.
+Notes reference each other with [[wikilinks]]; note frontmatter lists
+aliases and source books with printed pages.
 
-Note layout:
-- notes/: one note per rule or lore concept. Frontmatter carries aliases, tags,
-  and sources — the book(s) and printed pages the note cites, as
-  entries like "stormlight-handbook: 142-143".
-- _index/: one map-of-content note per book chapter, listing that
-  chapter's notes.
-- Notes reference each other with [[wikilinks]].
+Workflow: your question arrives already searched, with the top notes
+already read. search_system again with better terms if they miss;
+read_note anything you cite — previews are never enough. When a note
+defers the answer to a linked note, read that note.
 
-Workflow for every question:
-1. search_system for the key terms (note names, aliases, and content are
-   indexed; results are notes ranked by relevance, each with one matching
-   line as a preview). Try synonyms if a search misses.
-2. read_note the most relevant hits in full — search result previews are
-   never enough to answer from.
-3. Follow [[wikilinks]] to related notes when the answer spans concepts,
-   and read the linked note whenever a note you read defers the actual
-   answer to it.
-
-Answering rules:
-- Quote mechanics exactly — numbers, dice, DCs, costs. Never approximate.
-- Cite every claim: note name plus the printed pages from its
-  frontmatter, e.g. (Raise the Stakes, p. 8-9).
-- Whenever your answer mentions a concept that has a note, write
-  it as a wikilink with the exact note name: [[Plot Die]], or
-  [[Raise the Stakes|raising the stakes]] when the sentence needs a
-  different surface form. The reader's terminal turns these into
-  numbered references they can open.
-- End every answer with a "Related:" line listing the wikilinks of the
-  notes you used or that the reader would sensibly open next.
-- If the notes don't cover the question, reply exactly "The system
-  doesn't cover this." and nothing else — never guess or fill gaps from
-  outside knowledge.
-- If the notes you read never mention the thing being asked about, that
-  is also not covered — reply exactly "The system doesn't cover this."
-  rather than answering about a different topic the search happened to
-  match.
-- Distinguish rules-as-written (quoted) from your interpretation, and
-  label the interpretation as such.
+Answering:
+- Lead with the direct answer, then only the supporting mechanics —
+  under 80 words unless exact mechanics need more. Quote mechanics
+  exactly: numbers, dice, DCs, costs.
+- Write each concept that has a note as a wikilink with its exact note
+  name: [[Plot Die]], or [[Plot Die|the plot die]] for a different
+  surface form. Cite claims as (note name, printed pages from its
+  frontmatter), only from notes you have read.
+- End with a "Related:" line of useful wikilinks.
+- Ignore given notes that are irrelevant to the question: no mentions,
+  no "doesn't cover" disclaimers about things nobody asked.
+- If the notes cannot answer the question — including when they never
+  mention the thing asked about — reply exactly "The system doesn't
+  cover this." and nothing else. Never fill gaps from outside knowledge.
+- Label anything that is your interpretation rather than rules-as-written.
 """
 
 SYSTEM_PROMPT = SYSTEM_PROMPT_TEMPLATE.format(rpg="cosmere")
@@ -536,23 +541,84 @@ def _resp_stat(response, key):
 
 
 def answer(question: str, model: str, messages: list | None = None, ctx: int = 8192) -> None:
+    started = time.monotonic()
+    try:
+        _answer(question, model, messages, ctx)
+    finally:
+        print(f"{DIM}  [{time.monotonic() - started:.1f}s]{RESET}", file=sys.stderr)
+
+
+def _inject_tool_call(messages: list, name: str, arguments: dict, result: str) -> None:
+    print(f"{DIM}  [{name}({arguments})]{RESET}", file=sys.stderr)
+    messages.append({"role": "assistant", "content": "", "tool_calls": [
+        {"function": {"name": name, "arguments": arguments}}]})
+    messages.append({"role": "tool", "name": name, "content": result})
+
+
+def _answer(question: str, model: str, messages: list | None = None, ctx: int = 8192) -> None:
     if messages is None:
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        SESSION_READS.clear()
     messages.append({"role": "user", "content": question})
     turn_start = len(messages)
     nudged = False
     read_nudged = False
     fake_nudged = False
+    cite_nudged = False
     read_any = False
+    read_paths = SESSION_READS
+    # Every question's first round is a search, so run it harness-side
+    # instead of paying a model call to ask for it — and hand over the top
+    # hits already read, since reading them is the model's next move anyway.
+    # A terse follow-up ("no i mean surges") is a useless query on its own,
+    # so fold the previous question back in for the search.
+    query = question
+    if len(question) < 48:
+        prev = next((m["content"] for m in reversed(messages[:turn_start - 1])
+                     if isinstance(m, dict) and m.get("role") == "user"), "")
+        if prev:
+            query = f"{prev} {question}"
+    results = search_system(query)
+    _inject_tool_call(messages, "search_system", {"query": query}, results)
+    # Inject only real notes: _index MOCs are link farms that flood the
+    # model with talent names it then riffs on instead of reading.
+    top_hits = [l for l in results.splitlines()
+                if l.startswith("NOTE MATCH: notes/")
+                or l.startswith("NOTE MATCH: _sources/")][:2]
+    for hit in top_hits:
+        path = SYSTEM_DIR / hit[len("NOTE MATCH: "):].split(" | ")[0]
+        try:
+            note_text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        # Trim the injected copy: frontmatter feeds the harness, not the
+        # model, and a size cap keeps prefill cheap — read_note still
+        # returns the full note when the model wants the rest.
+        note_text = re.sub(r"\A---\n.*?\n---\n+", "", note_text, flags=re.DOTALL)
+        if len(note_text) > 4000:
+            # Cut at a section boundary: a mid-sentence cut reads like a
+            # malformed note and invites invented section names.
+            cut = note_text.rfind("\n#", 0, 4000)
+            note_text = (note_text[:cut if cut > 1000 else 4000]
+                         + "\n[truncated — read_note this note for the rest]")
+        _inject_tool_call(messages, "read_note", {"name": path.stem}, note_text)
+        read_any = True
+        read_paths.add(path)
     for _ in range(MAX_TURNS):
         call_started = time.monotonic()
-        response = ollama.chat(
-            model=model,
-            messages=messages,
-            tools=TOOLS,
-            options={"num_ctx": ctx, "temperature": 0},
-            keep_alive="30m",
-        )
+        try:
+            response = ollama.chat(
+                model=model,
+                messages=messages,
+                tools=TOOLS,
+                options={"num_ctx": ctx, "temperature": 0, "num_predict": 800,
+                         "repeat_penalty": 1.15},
+                keep_alive="30m",
+            )
+        except Exception as exc:  # noqa: BLE001 - a dead model call must not kill the REPL
+            print(f"Model call failed: {exc}")
+            del messages[turn_start:]
+            return
         message = response["message"]
         messages.append(message)
         tool_calls = message.get("tool_calls") or []
@@ -598,6 +664,21 @@ def answer(question: str, model: str, messages: list | None = None, ctx: int = 8
                     {"role": "user",
                      "content": FABRICATED_NUDGE.format(names=", ".join(fakes))})
                 continue
+            unread = cited_unread(content, read_paths)
+            if unread and not no_coverage:
+                if cite_nudged:
+                    print("Answer withheld: it cites pages from notes it never read "
+                          f"({', '.join(unread)}). Try rephrasing the question.")
+                    del messages[turn_start:]
+                    return
+                cite_nudged = True
+                print(f"{DIM}  [answer cited unread notes: "
+                      f"{', '.join(unread)}; nudging for a retry]{RESET}",
+                      file=sys.stderr)
+                messages.append(
+                    {"role": "user",
+                     "content": CITED_UNREAD_NUDGE.format(names=", ".join(unread))})
+                continue
             uncited = "[[" not in content and not re.search(r"\bp(?:\.|age)\s*\d", content)
             if uncited and not nudged and not no_coverage:
                 nudged = True
@@ -605,6 +686,12 @@ def answer(question: str, model: str, messages: list | None = None, ctx: int = 8
                       file=sys.stderr)
                 messages.append({"role": "user", "content": CITATION_NUDGE})
                 continue
+            # The small model likes to append an empty coverage disclaimer
+            # after a full answer; strip that dangling line.
+            if len(content) > 80:
+                content = re.sub(
+                    r"\n\(?the system does(?:n't| not) cover th\w+[.:]?\)?\s*\Z",
+                    "", content, flags=re.IGNORECASE).rstrip()
             print(render_markdown(content))
             print_sources(content)
             # Keep only [user question, final answer] in history: the tool
@@ -613,9 +700,12 @@ def answer(question: str, model: str, messages: list | None = None, ctx: int = 8
             return
         for call in tool_calls:
             fn = call["function"]
+            args = fn.get("arguments") or {}
             if fn["name"] == "read_note":
                 read_any = True
-            args = fn.get("arguments") or {}
+                path = NAME_MAP.get(str(args.get("name", "")).strip().lower())
+                if path is not None:
+                    read_paths.add(path)
             result = dispatch(fn["name"], args)
             print(f"{DIM}  [{fn['name']}({args})]{RESET}", file=sys.stderr)
             if VERBOSE:
@@ -659,6 +749,12 @@ def main() -> None:
     if args.question:
         answer(" ".join(args.question), args.model, ctx=args.ctx)
         return
+    # Load the model while the user types their first question; an empty
+    # prompt makes Ollama load and hold the model without generating.
+    threading.Thread(
+        target=lambda: ollama.generate(model=args.model, prompt="", keep_alive="30m"),
+        daemon=True,
+    ).start()
     print("Conversational REPL: follow-ups keep context. "
           "/2 or /open NAME shows a linked note, /system NAME switches "
           "system, /clear resets, q quits.", file=sys.stderr)
@@ -675,6 +771,7 @@ def main() -> None:
             return
         if question == "/clear":
             messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+            SESSION_READS.clear()
             print("(context cleared)", file=sys.stderr)
             continue
         if question.startswith("/system"):
@@ -684,6 +781,7 @@ def main() -> None:
                 print(f"Current system: {RPG_NAME}. Available: {listing}")
             elif load_system(name):
                 messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+                SESSION_READS.clear()
                 print("(context cleared)", file=sys.stderr)
             else:
                 print(f"No system '{name}'. Available: {listing}")
@@ -698,6 +796,7 @@ def main() -> None:
 
 
 NAME_MAP: dict[str, Path] = {}
+SESSION_READS: set[Path] = set()
 
 if __name__ == "__main__":
     main()
