@@ -9,14 +9,14 @@ Reports (writes books/<system>/<book>/work/postflight_report.md):
   - unit state summary
 
 Usage:
-    python3 book_postflight.py --system cosmere --book mistborn-handbook
-    python3 book_postflight.py --book <slug> --reconcile   # + headless fixes
-    python3 book_postflight.py --book <slug> --reconcile --model opus
+    python3 validate_book.py --system cosmere --book mistborn-handbook
+    python3 validate_book.py --book <slug> --reconcile   # + headless fixes
+    python3 validate_book.py --book <slug> --reconcile --model opus
 
 Report-only is read-only (safe any time). --reconcile launches a headless
 claude worker that applies the standard fixes (hub notes, aliases,
-unlinks, defined-elsewhere bookkeeping) per prompt_reconcile.md — don't
-use it while another run is writing to the same system's vault.
+unlinks, defined-elsewhere bookkeeping) per prompt_validate_book.md — don't
+use it while another run is writing to the same system's notes.
 """
 
 import argparse
@@ -29,22 +29,22 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 SYSTEMS = ROOT / "systems"
 BOOKS = ROOT / "books"
-PROMPT = ROOT / "prompt_reconcile.md"
+PROMPT = ROOT / "prompt_validate_book.md"
 WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)")
 
 
-def gather(vault: Path, book_slug: str) -> dict:
+def gather(system_dir: Path, book_slug: str) -> dict:
     link_targets: set[str] = set()
     moc_linked: set[str] = set()
     referrers: dict[str, set[str]] = {}
     created, merged = [], []
 
-    for moc in vault.glob("_index/*.md"):
+    for moc in system_dir.glob("_index/*.md"):
         link_targets.add(moc.stem.lower())
         for target in WIKILINK_RE.findall(moc.read_text(encoding="utf-8").replace("\\|", "|")):
             moc_linked.add(target.strip().lower())
 
-    notes = sorted(vault.glob("notes/*.md")) + sorted(vault.glob("_sources/*.md"))
+    notes = sorted(system_dir.glob("notes/*.md")) + sorted(system_dir.glob("_sources/*.md"))
     alias_re = re.compile(r"^aliases:\s*\[(.*)\]", re.MULTILINE)
     for note in notes:
         text = note.read_text(encoding="utf-8")
@@ -62,10 +62,10 @@ def gather(vault: Path, book_slug: str) -> dict:
             if book_slug in slugs:
                 (created if len(slugs) == 1 else merged).append(note.stem)
 
-    for note in sorted(vault.rglob("*.md")):
+    for note in sorted(system_dir.rglob("*.md")):
         if note.parent.name == "_meta":
             continue
-        rel = str(note.relative_to(vault))
+        rel = str(note.relative_to(system_dir))
         for target in WIKILINK_RE.findall(note.read_text(encoding="utf-8").replace("\\|", "|")):
             target = target.strip()
             if "\n" not in target:
@@ -73,7 +73,7 @@ def gather(vault: Path, book_slug: str) -> dict:
 
     unresolved = {t: sorted(srcs) for t, srcs in referrers.items()
                   if t.lower() not in link_targets}
-    uncovered = [n.stem for n in vault.glob("notes/*.md")
+    uncovered = [n.stem for n in system_dir.glob("notes/*.md")
                  if n.stem.lower() not in moc_linked]
     return {"unresolved": unresolved, "uncovered": sorted(uncovered),
             "created": created, "merged": merged}
@@ -87,10 +87,10 @@ def main() -> int:
     parser.add_argument("--model", default="sonnet")
     args = parser.parse_args()
 
-    vault = SYSTEMS / args.system
+    system_dir = SYSTEMS / args.system
     book_dir = BOOKS / args.system / args.book
-    if not vault.is_dir() or not book_dir.is_dir():
-        sys.exit(f"Missing {vault} or {book_dir}")
+    if not system_dir.is_dir() or not book_dir.is_dir():
+        sys.exit(f"Missing {system_dir} or {book_dir}")
     config = json.loads((book_dir / "book.json").read_text(encoding="utf-8"))
 
     state_file = book_dir / "work" / "state.json"
@@ -99,10 +99,10 @@ def main() -> int:
     pending = [u["id"] for u in chapters if state.get(u["id"], {}).get("status") != "done"]
 
     validator = subprocess.run(
-        [sys.executable, str(ROOT / "validate_vault.py"), "--system", args.system],
+        [sys.executable, str(ROOT / "validate_system.py"), "--system", args.system],
         cwd=ROOT, capture_output=True, text=True,
     )
-    facts = gather(vault, args.book)
+    facts = gather(system_dir, args.book)
 
     lines = [f"# Postflight: {config['title']} ({args.system}/{args.book})", ""]
     lines.append(f"Units: {len(chapters) - len(pending)}/{len(chapters)} done"
@@ -142,7 +142,7 @@ def main() -> int:
         book=args.book,
         book_title=config["title"],
         report=report_path.relative_to(ROOT),
-        vault=vault.relative_to(ROOT),
+        system_dir=system_dir.relative_to(ROOT),
     )
     log_path = book_dir / "logs" / "postflight.log"
     log_path.parent.mkdir(exist_ok=True)
@@ -155,7 +155,7 @@ def main() -> int:
         )
     print(f"Reconcile worker exit {result.returncode}")
     final = subprocess.run(
-        [sys.executable, str(ROOT / "validate_vault.py"), "--fix", "--system", args.system],
+        [sys.executable, str(ROOT / "validate_system.py"), "--fix", "--system", args.system],
         cwd=ROOT,
     )
     return result.returncode or final.returncode

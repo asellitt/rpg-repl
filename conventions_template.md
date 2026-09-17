@@ -1,6 +1,6 @@
-# Vault conventions
+# System conventions
 
-This vault is a rules knowledge base for one RPG system, built for agent
+Each system is a rules knowledge base for one RPG, built for agent
 search (grep + wikilink traversal). These conventions are binding for every
 note, whether written interactively or by the headless pipeline.
 

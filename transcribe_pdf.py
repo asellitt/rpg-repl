@@ -488,7 +488,7 @@ def main():
         "--title",
         default=None,
         help="Book title; when given, writes book.json ({title, page_offset}) "
-        "next to the output file for the run_chapters.py pipeline.",
+        "next to the output file for the process_book.py pipeline.",
     )
     parser.add_argument(
         "--not-furniture",

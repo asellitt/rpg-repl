@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Validate the vault: frontmatter completeness, H1/filename agreement,
+Validate a system's notes: frontmatter completeness, H1/filename agreement,
 and wikilink resolution.
 
 Usage:
-    python3 validate_vault.py                    # validate the default system
-    python3 validate_vault.py --system cosmere   # validate one system's vault
-    python3 validate_vault.py --links            # also print every unresolved link
-    python3 validate_vault.py --fix              # first unwrap line-wrapped wikilinks
+    python3 validate_system.py                    # validate the default system
+    python3 validate_system.py --system cosmere   # validate one system
+    python3 validate_system.py --links            # also print every unresolved link
+    python3 validate_system.py --fix              # first unwrap line-wrapped wikilinks
 
 Exit code 1 on hard failures (bad frontmatter, H1 mismatch), 0 otherwise.
 Unresolved wikilinks are informational -- forward links are expected
@@ -21,7 +21,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 SYSTEMS = ROOT / "systems"
-VAULT = SYSTEMS / "cosmere"
+SYSTEM_DIR = SYSTEMS / "cosmere"
 REQUIRED_KEYS = ("aliases", "tags", "sources")
 
 FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
@@ -59,20 +59,20 @@ def parse_aliases(value: str) -> list[str]:
 
 
 def main() -> int:
-    global VAULT
+    global SYSTEM_DIR
     parser = argparse.ArgumentParser()
     parser.add_argument("--links", action="store_true", help="print every unresolved wikilink")
     parser.add_argument("--fix", action="store_true", help="unwrap line-wrapped wikilinks first")
-    parser.add_argument("--system", default="cosmere", help="system vault under systems/")
+    parser.add_argument("--system", default="cosmere", help="system directory under systems/")
     args = parser.parse_args()
 
-    VAULT = SYSTEMS / args.system
-    if not VAULT.is_dir():
-        print(f"No system at {VAULT}")
+    SYSTEM_DIR = SYSTEMS / args.system
+    if not SYSTEM_DIR.is_dir():
+        print(f"No system at {SYSTEM_DIR}")
         return 1
 
     if args.fix:
-        for note in sorted(VAULT.rglob("*.md")):
+        for note in sorted(SYSTEM_DIR.rglob("*.md")):
             if note.parent.name == "_meta":
                 continue
             text = note.read_text(encoding="utf-8")
@@ -89,16 +89,16 @@ def main() -> int:
     link_targets: set[str] = set()
     all_links: dict[str, list[str]] = {}
 
-    # Obsidian's click-to-create drops empty notes at the vault root;
+    # Obsidian's click-to-create drops empty notes at the top-level dirs;
     # notes only belong under a system's notes/, _index/, or _sources/.
-    for stray in list(SYSTEMS.glob("*.md")) + list(VAULT.glob("*.md")):
+    for stray in list(SYSTEMS.glob("*.md")) + list(SYSTEM_DIR.glob("*.md")):
         failures.append(f"{stray.relative_to(ROOT)}: stray note outside notes/_index/_sources "
                         f"(Obsidian click-to-create?)")
 
-    for moc in VAULT.glob("_index/*.md"):
+    for moc in SYSTEM_DIR.glob("_index/*.md"):
         link_targets.add(moc.stem.lower())
 
-    notes = sorted(VAULT.glob("notes/*.md")) + sorted(VAULT.glob("_sources/*.md"))
+    notes = sorted(SYSTEM_DIR.glob("notes/*.md")) + sorted(SYSTEM_DIR.glob("_sources/*.md"))
     for note in notes:
         text = note.read_text(encoding="utf-8")
         rel = note.relative_to(ROOT)
@@ -121,7 +121,7 @@ def main() -> int:
         elif note.parent.name == "notes" and h1s[0] != note.stem:
             failures.append(f"{rel}: H1 '{h1s[0]}' != filename '{note.stem}'")
 
-    for note in sorted(VAULT.rglob("*.md")):
+    for note in sorted(SYSTEM_DIR.rglob("*.md")):
         if note.parent.name == "_meta":  # conventions contain template examples
             continue
         rel = str(note.relative_to(ROOT))
@@ -136,14 +136,14 @@ def main() -> int:
     unresolved = {t: srcs for t, srcs in all_links.items() if t.lower() not in link_targets}
 
     moc_linked: set[str] = set()
-    for moc in VAULT.glob("_index/*.md"):
+    for moc in SYSTEM_DIR.glob("_index/*.md"):
         for target in WIKILINK_RE.findall(moc.read_text(encoding="utf-8").replace("\\|", "|")):
             moc_linked.add(target.strip().lower())
     uncovered = sorted(
-        n.stem for n in VAULT.glob("notes/*.md") if n.stem.lower() not in moc_linked
+        n.stem for n in SYSTEM_DIR.glob("notes/*.md") if n.stem.lower() not in moc_linked
     )
 
-    note_count = len(list(VAULT.glob("notes/*.md")))
+    note_count = len(list(SYSTEM_DIR.glob("notes/*.md")))
     print(f"{note_count} notes, {len(all_links)} distinct wikilink targets, "
           f"{len(unresolved)} unresolved, {len(uncovered)} in no MOC")
 

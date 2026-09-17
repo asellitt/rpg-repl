@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Self-hosted web viewer for the systems/ vaults: rendered markdown,
+Self-hosted web viewer for the systems/ notes: rendered markdown,
 resolved wikilinks (aliases included), tag/source chips, backlinks,
 and per-system search. Reads the live files — no build step.
 
@@ -165,14 +165,14 @@ class SystemIndex:
     def refresh(self) -> None:
         if time.time() - self.built < CACHE_TTL:
             return
-        vault = SYSTEMS / self.system
+        system_dir = SYSTEMS / self.system
         self.names: dict[str, Path] = {}
         self.texts: dict[Path, str] = {}
         self.backlinks: dict[str, set[str]] = {}
         self.book_titles: dict[str, str] = {}
 
         for folder in ("notes", "_index", "_sources"):
-            for path in sorted((vault / folder).glob("*.md")):
+            for path in sorted((system_dir / folder).glob("*.md")):
                 text = path.read_text(encoding="utf-8")
                 self.texts[path] = text
                 self.names.setdefault(path.stem.lower(), path)

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Drive headless Claude Code over a book's chapter units, writing rules
-notes into that system's vault under systems/.
+notes into that system's directory under systems/.
 
 Each book lives at books/<system>/<book-slug>/ containing:
     book.json       {"title": ..., "page_offset": N}
@@ -11,13 +11,13 @@ Each book lives at books/<system>/<book-slug>/ containing:
     logs/           headless worker transcripts
 
 Usage:
-    python3 run_chapters.py                          # all pending units
-    python3 run_chapters.py 01 05b                   # unit ids/prefixes
-    python3 run_chapters.py --system cosmere --book stormlight-handbook 02
-    python3 run_chapters.py --model opus 04
-    python3 run_chapters.py --dry-run 01
-    python3 run_chapters.py --force 01
-    python3 run_chapters.py --status
+    python3 process_book.py                          # all pending units
+    python3 process_book.py 01 05b                   # unit ids/prefixes
+    python3 process_book.py --system cosmere --book stormlight-handbook 02
+    python3 process_book.py --model opus 04
+    python3 process_book.py --dry-run 01
+    python3 process_book.py --force 01
+    python3 process_book.py --status
 
 --system defaults to the sole directory under systems/ (else cosmere);
 --book defaults to the sole book under books/<system>/ and is required
@@ -37,7 +37,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 SYSTEMS = ROOT / "systems"
 BOOKS = ROOT / "books"
-PROMPT_TEMPLATE = ROOT / "prompt_template.md"
+PROMPT_TEMPLATE = ROOT / "prompt_process_book.md"
 
 
 def sole_or_default(parent: Path, default: str | None, kind: str) -> str:
@@ -56,11 +56,11 @@ class Book:
         self.system = system
         self.slug = slug
         self.dir = BOOKS / system / slug
-        self.vault = SYSTEMS / system
+        self.system_dir = SYSTEMS / system
         if not self.dir.is_dir():
             sys.exit(f"No book at {self.dir}")
-        if not self.vault.is_dir():
-            sys.exit(f"No system vault at {self.vault}")
+        if not self.system_dir.is_dir():
+            sys.exit(f"No system directory at {self.system_dir}")
         config = json.loads((self.dir / "book.json").read_text(encoding="utf-8"))
         self.title = config["title"]
         self.page_offset = config["page_offset"]
@@ -111,9 +111,9 @@ def slice_unit(book: Book, pages: dict[int, str], unit: dict) -> Path:
 def build_prompt(book: Book, unit: dict, chunk_path: Path) -> str:
     return PROMPT_TEMPLATE.read_text(encoding="utf-8").format(
         title=unit["title"],
-        moc=(book.vault / "_index" / f"{unit['moc']}.md").relative_to(ROOT),
+        moc=(book.system_dir / "_index" / f"{unit['moc']}.md").relative_to(ROOT),
         chunk=chunk_path.relative_to(ROOT),
-        vault=book.vault.relative_to(ROOT),
+        system_dir=book.system_dir.relative_to(ROOT),
         system=book.system,
         book=book.slug,
         book_title=book.title,
@@ -123,7 +123,7 @@ def build_prompt(book: Book, unit: dict, chunk_path: Path) -> str:
 
 
 def rules_snapshot(book: Book) -> set[str]:
-    return {p.name for p in (book.vault / "notes").glob("*.md")}
+    return {p.name for p in (book.system_dir / "notes").glob("*.md")}
 
 
 def run_unit(book: Book, unit: dict, pages: dict[int, str], model: str, dry_run: bool) -> dict:
@@ -159,7 +159,7 @@ def run_unit(book: Book, unit: dict, pages: dict[int, str], model: str, dry_run:
         return {"status": "failed", "exit": result.returncode}
 
     validator = subprocess.run(
-        [sys.executable, str(ROOT / "validate_vault.py"), "--fix", "--system", book.system],
+        [sys.executable, str(ROOT / "validate_system.py"), "--fix", "--system", book.system],
         cwd=ROOT,
     )
     if validator.returncode != 0:

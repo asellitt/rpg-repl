@@ -1,6 +1,6 @@
 # rpg-repl pipeline
 
-Turns RPG rulebook PDFs into per-system Obsidian rules vaults
+Turns RPG rulebook PDFs into per-RPG-system Obsidian rules notes
 (`systems/`), and answers rules questions over them with a local LLM
 (`ask.py` + Ollama). Everything below is the operating knowledge for
 running the pipeline; note-level rules live in each system's
@@ -21,32 +21,32 @@ books/<system>/<slug>/   per-book pipeline: book.json {title, page_offset},
 ```
 
 Unit state is `books/<system>/<slug>/work/state.json` — the driver skips
-`done` units, so runs are resumable. Never edit `prompt_template.md`,
+`done` units, so runs are resumable. Never edit `prompt_process_book.md`,
 `chapters.json`, or a book's `work/` while that book's run is live (the
 template is re-read per unit; state is rewritten wholesale per unit).
 
 Run ONE book at a time within a system: its workers all write the same
-vault, so concurrent runs race on shared notes and each driver's
+notes, so concurrent runs race on shared notes and each driver's
 validator pass can fail on the other's half-written files. Books of
-different systems can run concurrently (disjoint vaults). Within a
+different systems can run concurrently (disjoint directories). Within a
 system, process books in dependency order (core handbook before
 bestiaries/setting guides).
 
 ## Pipeline per book
 
 1. `python3 transcribe_pdf.py BOOK.pdf books/<system>/<slug>/extracted.txt
---layout --known-pair PDF=PRINTED --title "Book Title"`
+   --layout --known-pair PDF=PRINTED --title "Book Title"`
    Review its furniture report (real content vs running heads) and the
    empty-page list (full-art pages are normal).
-2. `python3 map_chapters.py --system <system> --book <slug>` — scaffolds
-   a new system's vault if needed, builds the heading outline, drafts
+2. `python3 plan_book.py --system <system> --book <slug>` — scaffolds
+   a new system's directory if needed, builds the heading outline, drafts
    chapters.json via a headless worker. REVIEW the draft (unit sizes,
    skips, MOC names) before running units.
-3. `python3 run_chapters.py --system <system> --book <slug>` — headless
+3. `python3 process_book.py --system <system> --book <slug>` — headless
    note-writing, one `claude -p` worker per unit (~5-20 min each,
    default --model sonnet). Validator runs per unit and halts the run on
    hard failures; fix and re-run (completed units are skipped).
-4. `python3 book_postflight.py --system <system> --book <slug>` — the
+4. `python3 validate_book.py --system <system> --book <slug>` — the
    post-book report (dangling links, MOC coverage, merge stats); add
    `--reconcile` to have a headless worker apply the standard fixes.
 5. Ship: zip `systems/` + `ask.py` to the REPL machine.
@@ -71,13 +71,13 @@ bestiaries/setting guides).
   page_offset).
 - Every book has a note in the system's `_sources/` (title H1, aliases,
   page offset, full chapter table, "Referenced but defined elsewhere"
-  list). map_chapters.py writes the stub deterministically at draft
+  list). plan_book.py writes the stub deterministically at draft
   time; workers may enrich it, and the postflight reconcile verifies
   its truthfulness before reasoning from it.
 
 ## Known failure modes and watch-items
 
-- Workers sometimes line-wrap wikilinks; `validate_vault.py --fix`
+- Workers sometimes line-wrap wikilinks; `validate_system.py --fix`
   repairs this mechanically (the driver runs it per unit).
 - `[[Name\|display]]` (escaped pipe in tables) is valid Obsidian; all
   tools normalize it before parsing.
@@ -90,7 +90,7 @@ bestiaries/setting guides).
 - Dangling links after a book are normal: forward refs to unprocessed
   chapters/books, book-section names that became several atomic notes
   (fix: hub note), or concepts defined in unowned books (document in the
-  \_sources note's "Referenced but defined elsewhere").
+  _sources note's "Referenced but defined elsewhere").
 - The `claude -p` workers run with --permission-mode acceptEdits from
   the repo root; their transcripts land in the book's logs/.
 
@@ -101,4 +101,4 @@ Local rules lawyer over one system's notes: Ollama + tool calling
 `/N` opens linked notes, Sources footer is harness-generated from
 frontmatter. Model default qwen2.5:7b; `--model qwen2.5:14b` when
 quality matters more than speed. Its answers only cite what the
-vault holds.
+system's notes hold.

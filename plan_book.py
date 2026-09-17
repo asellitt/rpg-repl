@@ -2,18 +2,18 @@
 """
 Draft a book's chapters.json (unit map) from its extracted text.
 
-For a new system, scaffolds systems/<system>/ first (vault dirs plus a
+For a new system, scaffolds systems/<system>/ first (note dirs plus a
 conventions.md seeded from conventions_template.md — review its tag
 taxonomy before running units).
 
 Usage:
-    python3 map_chapters.py --system cosmere --book mistborn-handbook
-    python3 map_chapters.py --book <slug> --outline-only   # no LLM step
-    python3 map_chapters.py --book <slug> --model opus
+    python3 plan_book.py --system cosmere --book mistborn-handbook
+    python3 plan_book.py --book <slug> --outline-only   # no LLM step
+    python3 plan_book.py --book <slug> --model opus
 
 Requires books/<system>/<slug>/{extracted.txt, book.json} (transcribe_pdf.py
 with --title produces both). The draft chapters.json is written by a
-headless claude worker and MUST be reviewed before run_chapters.py.
+headless claude worker and MUST be reviewed before process_book.py.
 """
 
 import argparse
@@ -26,21 +26,26 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 SYSTEMS = ROOT / "systems"
 BOOKS = ROOT / "books"
-PROMPT = ROOT / "prompt_map_chapters.md"
+PROMPT = ROOT / "prompt_plan_book.md"
 TEMPLATE = ROOT / "conventions_template.md"
 
 
 def scaffold_system(system: str) -> None:
-    vault = SYSTEMS / system
-    if vault.is_dir():
+    system_dir = SYSTEMS / system
+    if system_dir.is_dir():
         return
     for sub in ("_meta", "_sources", "_index", "notes"):
-        (vault / sub).mkdir(parents=True)
-    (vault / "_meta" / "conventions.md").write_text(
+        (system_dir / sub).mkdir(parents=True)
+    (system_dir / "_meta" / "conventions.md").write_text(
         TEMPLATE.read_text(encoding="utf-8"), encoding="utf-8"
     )
-    print(f"Scaffolded new system vault at {vault}")
+    default_display = system.replace("-", " ").title()
+    (system_dir / "_meta" / "system.json").write_text(
+        json.dumps({"display_name": default_display}, indent=2) + "\n", encoding="utf-8"
+    )
+    print(f"Scaffolded new system at {system_dir}")
     print("  -> REVIEW _meta/conventions.md: tailor the tag taxonomy before running units.")
+    print(f"  -> REVIEW _meta/system.json: display name defaulted to '{default_display}'.")
 
 
 def write_sources_stub(system: str, slug: str, config: dict, units: list[dict]) -> None:
@@ -76,7 +81,7 @@ tags: [source]
 
 ## Referenced but defined elsewhere
 
-Concepts this book uses without defining them; their vault links stay
+Concepts this book uses without defining them; their links stay
 unresolved until a defining book is processed:
 
 (none recorded yet — the postflight pass maintains this list)
@@ -150,7 +155,7 @@ def main() -> int:
         system=args.system,
         page_offset=config["page_offset"],
         outline=outline_path.relative_to(ROOT),
-        vault=(SYSTEMS / args.system).relative_to(ROOT),
+        system_dir=(SYSTEMS / args.system).relative_to(ROOT),
         chapters_path=chapters_path.relative_to(ROOT),
     )
     print(f"Drafting unit map with claude -p ({args.model})...", flush=True)
@@ -180,7 +185,7 @@ def main() -> int:
     write_sources_stub(args.system, args.book, config, units)
     print(f"\nDraft OK: {len(units)} units in {chapters_path}")
     print("REVIEW the draft (unit sizes, skips, MOC names), then run:")
-    print(f"  python3 run_chapters.py --system {args.system} --book {args.book}")
+    print(f"  python3 process_book.py --system {args.system} --book {args.book}")
     return 0
 
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Rules-lawyer agent over the vault, powered by a local Ollama model with
+Rules-lawyer agent over one RPG system's notes, powered by a local Ollama model with
 tool calling.
 
 Usage:
@@ -27,7 +27,7 @@ except ImportError:
 
 ROOT = Path(__file__).resolve().parent
 SYSTEMS = ROOT / "systems"
-VAULT = SYSTEMS / "cosmere"
+SYSTEM_DIR = SYSTEMS / "cosmere"
 MAX_TURNS = 12
 
 USE_COLOR = sys.stdout.isatty() and sys.stdin.isatty()
@@ -132,15 +132,15 @@ CITATION_NUDGE = (
 )
 
 SEARCH_FIRST_NUDGE = (
-    "You answered without consulting the vault. Use search_vault and "
-    "read_note first, then answer only from what they return. If no "
-    "relevant notes exist, reply only that the vault doesn't cover this."
+    "You answered without consulting the system's notes. Use search_system "
+    "and read_note first, then answer only from what they return. If no "
+    "relevant notes exist, reply only that the system doesn't cover this."
 )
 
 FABRICATED_NUDGE = (
-    "Your answer referenced notes that do not exist in the vault: {names}. "
+    "Your answer referenced notes that do not exist in the system: {names}. "
     "Drop every claim that came from them and keep only what the notes you "
-    "actually read support. If nothing remains, reply only that the vault "
+    "actually read support. If nothing remains, reply only that the system "
     "doesn't cover this."
 )
 
@@ -152,7 +152,7 @@ def book_name(slug: str) -> str:
     """Display name for a source slug, from the _sources note's H1."""
     if slug not in BOOK_NAMES:
         BOOK_NAMES[slug] = slug
-        source_note = VAULT / "_sources" / f"{slug}.md"
+        source_note = SYSTEM_DIR / "_sources" / f"{slug}.md"
         if source_note.exists():
             for line in source_note.read_text(encoding="utf-8").splitlines():
                 if line.startswith("# "):
@@ -163,7 +163,7 @@ def book_name(slug: str) -> str:
 
 def print_sources(content: str) -> None:
     """Print a footer citing the book and pages of every note the answer
-    linked, straight from vault frontmatter (immune to model
+    linked, straight from note frontmatter (immune to model
     hallucination)."""
     cited: list[Path] = []
     for match in re.finditer(r"\[\[([^\]|#]+)", content.replace("\\|", "|")):
@@ -187,7 +187,7 @@ def print_sources(content: str) -> None:
 
 
 def fabricated_links(content: str) -> list[str]:
-    """Wikilinks in the answer that resolve to no vault note or alias."""
+    """Wikilinks in the answer that resolve to no note or alias in the system."""
     fakes: list[str] = []
     for match in re.finditer(r"\[\[([^\]|#]+)", content.replace("\\|", "|")):
         name = match.group(1).strip()
@@ -210,10 +210,10 @@ def open_note(ref: str) -> None:
 
 SYSTEM_PROMPT_TEMPLATE = """\
 You are a rules expert for the {rpg} tabletop RPG, answering from an
-Obsidian vault of rules notes. The vault is the only source of truth —
-never answer from general knowledge.
+Obsidian collection of rules notes. Those notes are the only source of
+truth — never answer from general knowledge.
 
-Vault layout:
+Note layout:
 - notes/: one note per rule or lore concept. Frontmatter carries aliases, tags,
   and sources — the book(s) and printed pages the note cites, as
   entries like "stormlight-handbook: 142-143".
@@ -222,7 +222,7 @@ Vault layout:
 - Notes reference each other with [[wikilinks]].
 
 Workflow for every question:
-1. search_vault for the key terms (note names, aliases, and content are
+1. search_system for the key terms (note names, aliases, and content are
    indexed; results are notes ranked by relevance, each with one matching
    line as a preview). Try synonyms if a search misses.
 2. read_note the most relevant hits in full.
@@ -232,14 +232,14 @@ Answering rules:
 - Quote mechanics exactly — numbers, dice, DCs, costs. Never approximate.
 - Cite every claim: note name plus the printed pages from its
   frontmatter, e.g. (Raise the Stakes, p. 8-9).
-- Whenever your answer mentions a concept that has a vault note, write
+- Whenever your answer mentions a concept that has a note, write
   it as a wikilink with the exact note name: [[Plot Die]], or
   [[Raise the Stakes|raising the stakes]] when the sentence needs a
   different surface form. The reader's terminal turns these into
   numbered references they can open.
 - End every answer with a "Related:" line listing the wikilinks of the
   notes you used or that the reader would sensibly open next.
-- If the vault doesn't cover the question, reply exactly "The vault
+- If the notes don't cover the question, reply exactly "The system
   doesn't cover this." and nothing else — never guess or fill gaps from
   outside knowledge.
 - Distinguish rules-as-written (quoted) from your interpretation, and
@@ -271,11 +271,11 @@ def available_systems() -> list[str]:
 
 def load_system(name: str) -> bool:
     """Point the agent at systems/<name>; returns False if it doesn't exist."""
-    global VAULT, RPG_NAME, SYSTEM_PROMPT, NAME_MAP
+    global SYSTEM_DIR, RPG_NAME, SYSTEM_PROMPT, NAME_MAP
     path = SYSTEMS / name
     if not path.is_dir():
         return False
-    VAULT = path
+    SYSTEM_DIR = path
     RPG_NAME = display_name(name)
     SYSTEM_PROMPT = SYSTEM_PROMPT_TEMPLATE.format(rpg=RPG_NAME)
     NAME_MAP = build_name_map()
@@ -289,8 +289,8 @@ TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "search_vault",
-            "description": "Case-insensitive search over all vault notes: note names, aliases, and body text. Returns matching lines as 'path: line'.",
+            "name": "search_system",
+            "description": "Case-insensitive search over all of the system's notes: note names, aliases, and body text. Returns notes ranked by relevance, each with one matching line as a preview.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -335,7 +335,7 @@ def build_name_map() -> dict[str, Path]:
     """Map lowercase note stems and aliases to note paths."""
     names: dict[str, Path] = {}
     alias_re = re.compile(r"^aliases:\s*\[(.*)\]", re.MULTILINE)
-    for note in list(VAULT.glob("notes/*.md")) + list(VAULT.glob("_sources/*.md")):
+    for note in list(SYSTEM_DIR.glob("notes/*.md")) + list(SYSTEM_DIR.glob("_sources/*.md")):
         names[note.stem.lower()] = note
         m = alias_re.search(note.read_text(encoding="utf-8"))
         if m:
@@ -364,13 +364,13 @@ def _token_matches(word: str, token: str) -> bool:
     return token.endswith("s") and len(token) > 3 and word.startswith(token[:-1])
 
 
-def _vault_index() -> dict:
-    """Per-note word counts, lines, and name/alias words, built once per vault."""
-    index = _INDEX_CACHE.get(VAULT)
+def _system_index() -> dict:
+    """Per-note word counts, lines, and name/alias words, built once per system."""
+    index = _INDEX_CACHE.get(SYSTEM_DIR)
     if index is not None:
         return index
     notes: dict[Path, tuple[dict[str, int], list[str]]] = {}
-    for note in sorted(VAULT.rglob("*.md")):
+    for note in sorted(SYSTEM_DIR.rglob("*.md")):
         if note.parent.name == "_meta":
             continue
         text = note.read_text(encoding="utf-8")
@@ -385,16 +385,16 @@ def _vault_index() -> dict:
         target = stem_words if name == path.stem.lower() else alias_words
         target.setdefault(path, set()).update(words)
     index = {"notes": notes, "stem": stem_words, "alias": alias_words}
-    _INDEX_CACHE[VAULT] = index
+    _INDEX_CACHE[SYSTEM_DIR] = index
     return index
 
 
-def search_vault(query: str) -> str:
+def search_system(query: str) -> str:
     query_lower = query.lower().strip()
     tokens = [
         t for t in WORD_RE.findall(query_lower) if t not in STOPWORDS
     ] or [query_lower]
-    index = _vault_index()
+    index = _system_index()
     notes = index["notes"]
     n_docs = len(notes) or 1
 
@@ -457,7 +457,7 @@ def search_vault(query: str) -> str:
     for _, note, lines in scored[:10]:
         line = best_line(lines)
         hits.append(
-            f"NOTE MATCH: {note.relative_to(VAULT)}"
+            f"NOTE MATCH: {note.relative_to(SYSTEM_DIR)}"
             + (f" | {line[:160]}" if line else "")
         )
     return "\n".join(hits)
@@ -474,16 +474,16 @@ def read_note(name: str) -> str:
 
 def list_index(chapter: str = "") -> str:
     if chapter:
-        for moc in VAULT.glob("_index/*.md"):
+        for moc in SYSTEM_DIR.glob("_index/*.md"):
             if chapter.strip().lower() in moc.stem.lower():
                 return moc.read_text(encoding="utf-8")
         return f"No index note matching '{chapter}'."
-    return "\n".join(sorted(p.stem for p in VAULT.glob("_index/*.md")))
+    return "\n".join(sorted(p.stem for p in SYSTEM_DIR.glob("_index/*.md")))
 
 
 def dispatch(name: str, arguments: dict) -> str:
-    if name == "search_vault":
-        return search_vault(str(arguments.get("query", "")))
+    if name == "search_system":
+        return search_system(str(arguments.get("query", "")))
     if name == "read_note":
         return read_note(str(arguments.get("name", "")))
     if name == "list_index":
@@ -537,11 +537,11 @@ def answer(question: str, model: str, messages: list | None = None, ctx: int = 8
         if not tool_calls:
             content = message.get("content", "").strip()
             no_coverage = re.fullmatch(
-                r"the vault does(?:n't| not) cover th\w+\.?", content.strip(),
+                r"the system does(?:n't| not) cover th\w+\.?", content.strip(),
                 re.IGNORECASE) is not None
             if not searched and not no_coverage:
                 if search_nudged:
-                    print("Answer withheld: the model wouldn't consult the vault. "
+                    print("Answer withheld: the model wouldn't consult the notes. "
                           "Try rephrasing the question.")
                     del messages[turn_start:]
                     return
@@ -595,7 +595,7 @@ def answer(question: str, model: str, messages: list | None = None, ctx: int = 8
 
 
 def main() -> None:
-    global NAME_MAP, VAULT, RPG_NAME, SYSTEM_PROMPT
+    global NAME_MAP, SYSTEM_DIR, RPG_NAME, SYSTEM_PROMPT
     parser = argparse.ArgumentParser()
     parser.add_argument("question", nargs="*", help="the rules question (omit for a REPL)")
     parser.add_argument("--model", default="qwen2.5:7b")
