@@ -2,7 +2,10 @@
 """
 Self-hosted web viewer for the systems/ notes: rendered markdown,
 resolved wikilinks (aliases included), tag/source chips, backlinks,
-and per-system search. Reads the live files — no build step.
+per-system search, and scanned book pages from pages/<system>/<book>/
+at /<system>/page/<book>/<pages> — "12" or "133,136-138"; each listed
+page or range also shows the page after it, 25 scans per view.
+Reads the live files — no build step.
 
 Usage:
     python3 serve.py                 # http://127.0.0.1:8420
@@ -29,8 +32,12 @@ except ImportError:
 
 ROOT = Path(__file__).resolve().parent.parent
 SYSTEMS = ROOT / "systems"
+PAGES = ROOT / "pages"
 CACHE_TTL = 30  # seconds before the link/alias index is rebuilt
+PAGE_CAP = 25  # scans rendered per view; the rest are behind a "next 25" link
 WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:\|([^\]]+))?\]\]")
+SOURCE_REF_RE = re.compile(
+    r"(\[\[([^\]|#]+)\]\],\s*p\.\s*)(\d+(?:\s*[-–]\s*\d+)?(?:,\s*\d+(?:\s*[-–]\s*\d+)?)*)")
 FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
 
 LOGO = """<svg width="20" height="20" viewBox="0 0 24 24" fill="none" \
@@ -103,8 +110,9 @@ CSS = """
 body { margin: 0; background: var(--bg); color: var(--fg);
   font: 16px/1.65 system-ui, -apple-system, "Segoe UI", sans-serif; }
 main { max-width: 48rem; margin: 0 auto; padding: 1rem 1.2rem 4rem; }
+main.wide { max-width: calc(1275px + 2.4rem); }  /* native scan width + padding */
 nav.top { border-bottom: 1px solid var(--border); padding: .6rem 1.2rem;
-  display: flex; gap: 1rem; align-items: baseline; flex-wrap: wrap; }
+  display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; }
 nav.top a { color: var(--accent); text-decoration: none; font-weight: 600; }
 a.brand { display: inline-flex; align-items: center; gap: .45rem; }
 a.brand svg { flex: none; }
@@ -125,6 +133,8 @@ a.unresolved { color: var(--muted); text-decoration: underline dashed; }
 .chip.t-scope { background: rgba(140,80,200,.16); }
 .chip.src { background: transparent; border: 1px solid var(--border);
   color: var(--muted); }
+a.chip.src { text-decoration: none; transition: border-color .15s; }
+a.chip.src:hover { border-color: var(--accent); color: var(--accent); }
 table { border-collapse: collapse; display: block; overflow-x: auto;
   margin: 1rem 0; }
 th, td { border: 1px solid var(--border); padding: .35rem .7rem;
@@ -152,6 +162,9 @@ sup.kbdnum { color: var(--muted); font-size: .68em; margin-left: .18em;
 .backlinks h3, .muted { color: var(--muted); }
 .hit { margin: .8rem 0; }
 .hit .line { color: var(--muted); font-size: .9rem; }
+img.scan { display: block; width: 100%; margin: 1rem 0;
+  border: 1px solid var(--border); border-radius: 8px; background: #fff; }
+.pagenav { display: flex; justify-content: space-between; margin: 1rem 0; }
 """
 
 
@@ -229,6 +242,16 @@ def note_url(system: str, stem: str) -> str:
 def render_markdown_body(text: str, system: str, idx: SystemIndex) -> str:
     text = text.replace("\\|", "|")
 
+    def source_ref(m: re.Match) -> str:
+        slug, pages = m.group(2).strip(), m.group(3)
+        spec = page_spec_url_part(system, slug, pages)
+        if spec is None:
+            return m.group(0)
+        return (f'<a class="wl" href="/{quote(system)}/page/{quote(slug)}/{spec}">'
+                f"{html.escape(slug)}, p. {html.escape(pages)}</a>")
+
+    text = SOURCE_REF_RE.sub(source_ref, text)
+
     def link(m: re.Match) -> str:
         name = m.group(1).strip()
         display = html.escape((m.group(2) or name).strip())
@@ -242,7 +265,7 @@ def render_markdown_body(text: str, system: str, idx: SystemIndex) -> str:
     return md.convert(text)
 
 
-def page(title: str, body: str, system: str | None = None) -> str:
+def page(title: str, body: str, system: str | None = None, wide: bool = False) -> str:
     crumbs = f'<a class="brand" href="/">{LOGO}rpg-repl</a>'
     search = ""
     if system:
@@ -251,13 +274,34 @@ def page(title: str, body: str, system: str | None = None) -> str:
         search = (f'<form action="/{quote(system)}/search">'
                   f'<input name="q" placeholder="search {label}…"></form>')
     favicon = quote(FAVICON_SVG, safe="/ :=\"'.,-")
+    main_class = " class='wide'" if wide else ""
     return (f"<!doctype html><meta charset='utf-8'>"
             f"<meta name='viewport' content='width=device-width, initial-scale=1'>"
             f"<title>{html.escape(title)}</title>"
             f'<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,{favicon}">'
             f"<style>{CSS}</style>"
-            f"<nav class='top'>{crumbs}{search}</nav><main>{body}</main>"
+            f"<nav class='top'>{crumbs}{search}</nav>"
+            f"<main{main_class}>{body}</main>"
             f"<script>{JS}</script>")
+
+
+def page_spec_url_part(system: str, slug: str, pages: str) -> str | None:
+    """Normalize a page reference ("133, 136–138") into the URL spec, or None
+    when it is malformed or resolves to no scanned pages."""
+    spec = re.sub(r"\s+", "", pages).replace("–", "-")
+    tokens = parse_page_spec(spec)
+    if tokens is None or expand_page_spec(system, slug, tokens) is None:
+        return None
+    return quote(spec, safe=",")
+
+
+def source_chip(system: str, slug: str, book: str, pages: str) -> str:
+    """One chip per source entry; the whole chip links to its page-scan view."""
+    label = f"{html.escape(book)} p. {html.escape(pages)}"
+    spec = page_spec_url_part(system, slug, pages)
+    if spec is None:
+        return f'<span class="chip src">{label}</span>'
+    return f'<a class="chip src" href="/{quote(system)}/page/{quote(slug)}/{spec}">{label}</a>'
 
 
 def frontmatter_chips(text: str, idx: SystemIndex) -> tuple[str, str]:
@@ -283,9 +327,9 @@ def frontmatter_chips(text: str, idx: SystemIndex) -> tuple[str, str]:
     if sources:
         for entry in re.findall(r'"([^"]+)"', sources.group(1)):
             slug, _, pages = entry.partition(":")
-            book = idx.book_titles.get(slug.strip(), slug.strip())
-            chips.append(f'<span class="chip src">{html.escape(book)} '
-                         f'p. {html.escape(pages.strip())}</span>')
+            slug = slug.strip()
+            book = idx.book_titles.get(slug, slug)
+            chips.append(source_chip(idx.system, slug, book, pages.strip()))
     return f'<div class="meta">{"".join(chips)}</div>' if chips else "", body
 
 
@@ -330,6 +374,91 @@ def note_page(system: str, name: str) -> str | None:
                            for b in back)
         body += f'<div class="backlinks"><h3>Linked from</h3>{links}</div>'
     return page(path.stem, body, system)
+
+
+def page_image(system: str, book: str, num: int) -> Path | None:
+    if num < 1:
+        return None
+    path = (PAGES / system / book / f"page-{num:04d}.png").resolve()
+    if not path.is_relative_to(PAGES.resolve()):
+        return None
+    return path if path.is_file() else None
+
+
+def parse_page_spec(spec: str) -> list[tuple[int, int | None]] | None:
+    """Parse "133,136-138" into (first, last-or-None) tokens; None if malformed."""
+    tokens: list[tuple[int, int | None]] = []
+    for raw in spec.split(","):
+        m = re.fullmatch(r"(\d+)(?:[-–](\d+))?", raw.strip())
+        if not m:
+            return None
+        first = int(m.group(1))
+        last = int(m.group(2)) if m.group(2) else None
+        if last is not None and last < first:
+            return None
+        tokens.append((first, last))
+    return tokens or None
+
+
+def expand_page_spec(system: str, book: str,
+                     tokens: list[tuple[int, int | None]]) -> list[int] | None:
+    """Each token renders its pages plus the one after. An explicit single page
+    must exist (None → 404); range members and +1 pages are skipped if missing."""
+    pages: list[int] = []
+
+    def add(num: int, required: bool) -> bool:
+        if page_image(system, book, num):
+            if num not in pages:
+                pages.append(num)
+            return True
+        return not required
+
+    for first, last in tokens:
+        if last is None:
+            if not add(first, required=True):
+                return None
+            add(first + 1, required=False)
+        else:
+            for num in range(first, last + 2):
+                add(num, required=False)
+    return pages or None
+
+
+def book_page_view(system: str, book: str, spec: str, start: int) -> str | None:
+    tokens = parse_page_spec(spec)
+    if tokens is None or start < 1:
+        return None
+    pages = expand_page_spec(system, book, tokens)
+    if pages is None:
+        return None
+    window = pages[start - 1:start - 1 + PAGE_CAP]
+    if not window:
+        return None
+    total = len(pages)
+
+    def nav() -> str:
+        prev_num = next((n for n in (window[0] - 2, window[0] - 1)
+                         if page_image(system, book, n)), None)
+        next_num = window[-1] + 1 if page_image(system, book, window[-1] + 1) else None
+        prev = (f'<span><a class="kbd" href="/{quote(system)}/page/{quote(book)}/{prev_num}">'
+                f"&larr; prev</a></span>" if prev_num else "<span></span>")
+        nxt = (f'<span><a class="kbd" href="/{quote(system)}/page/{quote(book)}/{next_num}">'
+               f"next &rarr;</a></span>" if next_num else "<span></span>")
+        mid = ""
+        if total > PAGE_CAP:
+            mid = (f'<span class="muted">pages {start}&ndash;'
+                   f"{min(start - 1 + PAGE_CAP, total)} of {total}</span>")
+            if start - 1 + PAGE_CAP < total:
+                mid += (f' <a class="kbd" href="/{quote(system)}/page/{quote(book)}/'
+                        f'{quote(spec)}?start={start + PAGE_CAP}">next {PAGE_CAP} &rarr;</a>')
+            mid = f"<span>{mid}</span>"
+        return f'<div class="pagenav">{prev}{mid}{nxt}</div>'
+
+    body = [nav()]
+    body += [f'<img class="scan" src="/{quote(system)}/page/{quote(book)}/{n}.png" '
+             f'alt="page {n}">' for n in window]
+    body.append(nav())
+    return page(f"{book} p. {spec}", "".join(body), system, wide=True)
 
 
 def highlight(line: str, q: str) -> str:
@@ -397,6 +526,15 @@ class Handler(BaseHTTPRequestHandler):
             if not parts:
                 return self.ok(home_page())
             system = parts[0]
+            if len(parts) == 4 and parts[1] == "page":
+                book, tail = parts[2], parts[3]
+                if tail.endswith(".png") and tail[:-4].isdigit():
+                    image = page_image(system, book, int(tail[:-4]))
+                    return self.ok_png(image) if image else self.notfound()
+                raw_start = parse_qs(url.query).get("start", ["1"])[0]
+                start = int(raw_start) if raw_start.isdigit() else 0
+                rendered = book_page_view(system, book, tail, start)
+                return self.ok(rendered) if rendered else self.notfound()
             if system not in system_names():
                 return self.notfound()
             if len(parts) == 1:
@@ -415,6 +553,14 @@ class Handler(BaseHTTPRequestHandler):
         data = body.encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def ok_png(self, path: Path):
+        data = path.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", "image/png")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
