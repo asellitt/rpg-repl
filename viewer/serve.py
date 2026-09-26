@@ -77,6 +77,28 @@ for (const ev of ['scroll', 'resize']) {
     debounce = setTimeout(assignNumbers, 120);
   }, { passive: true });
 }
+for (const box of document.querySelectorAll('.scanbox')) {
+  const img = box.querySelector('img');
+  let lastTap = 0;
+  function toggleZoom(clientX) {
+    if (img.classList.toggle('zoomed')) {
+      const r = box.getBoundingClientRect();
+      box.scrollLeft = clientX - r.left < r.width / 2
+        ? 0 : box.scrollWidth - box.clientWidth;
+    } else {
+      box.scrollLeft = 0;
+    }
+  }
+  img.addEventListener('dblclick', (e) => { e.preventDefault(); toggleZoom(e.clientX); });
+  img.addEventListener('touchend', (e) => {
+    const now = Date.now();
+    if (now - lastTap < 300 && e.changedTouches.length === 1) {
+      e.preventDefault();
+      toggleZoom(e.changedTouches[0].clientX);
+    }
+    lastTap = now;
+  });
+}
 document.addEventListener('keydown', (e) => {
   const tag = (e.target.tagName || '').toLowerCase();
   if (tag === 'input' || tag === 'textarea') {
@@ -119,6 +141,10 @@ a.brand svg { flex: none; }
 nav.top form { margin-left: auto; }
 nav.top input { background: var(--card); color: var(--fg);
   border: 1px solid var(--border); border-radius: 6px; padding: .3rem .6rem; }
+@media (max-width: 640px) {
+  nav.top form { width: 100%; margin-left: 0; }
+  nav.top input { width: 100%; }
+}
 h1, h2, h3 { line-height: 1.25; }
 h1 { margin-top: 1rem; }
 h2 { border-bottom: 1px solid var(--border); padding-bottom: .2rem; margin-top: 2rem; }
@@ -162,8 +188,10 @@ sup.kbdnum { color: var(--muted); font-size: .68em; margin-left: .18em;
 .backlinks h3, .muted { color: var(--muted); }
 .hit { margin: .8rem 0; }
 .hit .line { color: var(--muted); font-size: .9rem; }
-img.scan { display: block; width: 100%; margin: 1rem 0;
+.scanbox { margin: 1rem 0; overflow-x: auto; }
+img.scan { display: block; width: 100%; touch-action: manipulation;
   border: 1px solid var(--border); border-radius: 8px; background: #fff; }
+img.scan.zoomed { width: 200%; max-width: none; }
 .pagenav { display: flex; justify-content: space-between; margin: 1rem 0; }
 """
 
@@ -455,8 +483,9 @@ def book_page_view(system: str, book: str, spec: str, start: int) -> str | None:
         return f'<div class="pagenav">{prev}{mid}{nxt}</div>'
 
     body = [nav()]
-    body += [f'<img class="scan" src="/{quote(system)}/page/{quote(book)}/{n}.png" '
-             f'alt="page {n}">' for n in window]
+    body += [f'<div class="scanbox">'
+             f'<img class="scan" src="/{quote(system)}/page/{quote(book)}/{n}.png" '
+             f'alt="page {n}"></div>' for n in window]
     body.append(nav())
     return page(f"{book} p. {spec}", "".join(body), system, wide=True)
 
